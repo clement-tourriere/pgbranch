@@ -1,0 +1,35 @@
+database:
+  host: localhost
+  port: 5432
+  user: postgres
+  password: null
+  template_database: template0
+  database_prefix: pgbranch
+  auth:
+    methods:
+      - environment
+      - pgpass
+      - prompt
+    pgpass_file: null
+    service_name: null
+    prompt_for_password: false
+
+git:
+  auto_create_on_branch: true
+  branch_filter_regex: null
+  exclude_branches:
+    - main
+    - master
+
+behavior:
+  auto_cleanup: false
+  max_branches: 10
+  naming_strategy: prefix
+
+post_commands:
+  - echo 'DATABASE_URL=postgresql://{db_user}@{db_host}:{db_port}/{db_name}' >> .env
+  - name: Run database migrations
+    command: echo 'Would run: npm run migrate'
+    condition: never
+    continue_on_error: true
+  - echo 'Database {db_name} ready for branch {branch_name}!'

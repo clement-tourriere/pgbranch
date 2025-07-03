@@ -1,0 +1,50 @@
+database:
+  host: localhost
+  port: 5432
+  user: postgres
+  password: null
+  template_database: myapp_db
+  database_prefix: pgbranch
+  auth:
+    methods:
+      - environment
+      - pgpass
+      - password
+      - prompt
+    pgpass_file: null
+    service_name: null
+    prompt_for_password: false
+
+git:
+  auto_create_on_branch: true
+  branch_filter_regex: null
+  exclude_branches:
+    - main
+    - master
+    - develop
+
+behavior:
+  auto_cleanup: true
+  max_branches: 5
+  naming_strategy: prefix
+
+post_commands:
+  - action: replace
+    name: Update Django database configuration (.env.local)
+    file: .env.local
+    pattern: DATABASE_URL=.*
+    replacement: DATABASE_URL=postgresql://{db_user}@{db_host}:{db_port}/{db_name}
+    create_if_missing: true
+    condition: file_exists:manage.py
+    continue_on_error: false
+
+  - name: Run Django migrations
+    command: python manage.py migrate
+    condition: file_exists:manage.py
+    continue_on_error: false
+    environment:
+      DATABASE_URL: postgresql://{db_user}@{db_host}:{db_port}/{db_name}
+
+  - name: Restart Docker Compose services
+    command: docker compose restart
+    continue_on_error: true

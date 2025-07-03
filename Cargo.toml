@@ -1,0 +1,63 @@
+[package]
+name = "pgbranch"
+version = "0.1.0"
+edition = "2021"
+description = "A tool for creating PostgreSQL database branches that sync with Git branches"
+authors = ["Clément Tourrière <clement.tourriere@gmail.com>"]
+license = "MIT"
+repository = "https://github.com/clement-tourriere/pgbranch"
+
+[dependencies]
+# CLI and argument parsing - minimal features for size
+clap = { version = "4.5", default-features = false, features = ["derive", "std", "help", "usage", "error-context"] }
+
+# Serialization - YAML only
+serde = { version = "1.0", default-features = false, features = ["derive", "std"] }
+serde_yaml = { version = "0.9", default-features = false }
+
+# Async runtime - minimal features for size
+tokio = { version = "1.46", default-features = false, features = ["rt", "net", "time", "macros"] }
+
+# Database
+tokio-postgres = { version = "0.7", default-features = false, features = ["runtime"] }
+
+# Error handling
+anyhow = "1.0"
+
+# Git operations
+git2 = { version = "0.20", default-features = false }
+
+# Text matching - ultra minimal features
+regex = { version = "1.11", default-features = false, features = ["std", "perf-cache"] }
+
+# File system - minimal features
+dirs = { version = "6.0", default-features = false }
+
+# Logging - minimal features for size (release mode removes logs)
+log = { version = "0.4", default-features = false, features = ["release_max_level_off"] }
+env_logger = { version = "0.11", default-features = false, features = ["humantime"] }
+
+# Password input - minimal features
+rpassword = { version = "7.4", default-features = false }
+
+# Terminal UI for interactive selection
+inquire = { version = "0.7", default-features = false, features = ["crossterm"] }
+
+[dev-dependencies]
+tempfile = "3.20"
+
+[profile.release]
+# Aggressive size optimization
+opt-level = "z"        # Optimize for size
+lto = "fat"            # Fat Link Time Optimization for maximum size reduction
+codegen-units = 1      # Reduce parallel code generation units
+panic = "abort"        # Abort on panic instead of unwinding
+strip = true           # Strip symbols and debug info
+overflow-checks = false # Disable overflow checks for smaller binary
+debug-assertions = false # Disable debug assertions
+incremental = false    # Disable incremental compilation
+
+[profile.dev]
+# Keep development builds fast
+opt-level = 0
+debug = true

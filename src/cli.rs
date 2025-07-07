@@ -171,24 +171,13 @@ pub async fn handle_command(cmd: Commands) -> Result<()> {
             
             let mut config = Config::default();
             
-            // Auto-detect main Git branch
+            // Auto-detect main Git branch using improved detection
             if let Ok(git_repo) = GitRepository::new(".") {
-                // Try to detect main branch by checking common names and their existence
-                let potential_main_branches = vec!["main", "master", "develop"];
-                for branch_name in potential_main_branches {
-                    if git_repo.branch_exists(branch_name).unwrap_or(false) {
-                        config.git.main_branch = branch_name.to_string();
-                        println!("🔍 Auto-detected main Git branch: {}", branch_name);
-                        break;
-                    }
-                }
-                
-                // If we couldn't auto-detect, try to get the current branch as fallback
-                if config.git.main_branch == "main" { // Still default
-                    if let Ok(Some(current_branch)) = git_repo.get_current_branch() {
-                        config.git.main_branch = current_branch.clone();
-                        println!("🔍 Using current Git branch as main: {}", current_branch);
-                    }
+                if let Ok(Some(detected_main)) = git_repo.detect_main_branch() {
+                    config.git.main_branch = detected_main.clone();
+                    println!("🔍 Auto-detected main Git branch: {}", detected_main);
+                } else {
+                    println!("⚠️  Could not auto-detect main Git branch, using default: main");
                 }
             }
             

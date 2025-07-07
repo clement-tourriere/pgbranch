@@ -39,6 +39,96 @@ impl GitRepository {
         }
     }
 
+    pub fn detect_main_branch(&self) -> Result<Option<String>> {
+        // Strategy 1: Check for remote's default branch (most reliable)
+        if let Some(main_branch) = self.get_remote_default_branch()? {
+            log::debug!("Found remote default branch: {}", main_branch);
+            return Ok(Some(main_branch));
+        }
+
+        // Strategy 2: Check common main branch names that exist locally
+        let common_main_branches = vec!["main", "master", "develop", "development"];
+        for branch_name in common_main_branches {
+            if self.branch_exists(branch_name)? {
+                log::debug!("Found local main branch: {}", branch_name);
+                return Ok(Some(branch_name.to_string()));
+            }
+        }
+
+        // Strategy 3: Find the local branch that tracks a remote main branch
+        if let Some(main_branch) = self.find_local_tracking_main_branch()? {
+            log::debug!("Found local branch tracking remote main: {}", main_branch);
+            return Ok(Some(main_branch));
+        }
+
+        // Strategy 4: Use current branch as last resort (original behavior)
+        if let Some(current_branch) = self.get_current_branch()? {
+            log::debug!("Using current branch as fallback main: {}", current_branch);
+            return Ok(Some(current_branch));
+        }
+
+        Ok(None)
+    }
+
+    fn get_remote_default_branch(&self) -> Result<Option<String>> {
+        // Try to get the default branch from the remote
+        let mut found_default = None;
+        
+        // Get all remotes
+        let remotes = self.repo.remotes()?;
+        
+        // Check origin first, then others
+        let remote_names: Vec<&str> = if remotes.iter().any(|r| r == Some("origin")) {
+            let mut names = vec!["origin"];
+            names.extend(remotes.iter().filter_map(|r| r).filter(|&r| r != "origin"));
+            names
+        } else {
+            remotes.iter().filter_map(|r| r).collect()
+        };
+
+        for remote_name in remote_names {
+            if let Ok(_remote) = self.repo.find_remote(remote_name) {
+                // Look for HEAD reference in remote
+                let head_ref = format!("refs/remotes/{}/HEAD", remote_name);
+                if let Ok(reference) = self.repo.find_reference(&head_ref) {
+                    if let Some(target) = reference.symbolic_target() {
+                        // Extract branch name from refs/remotes/origin/main -> main
+                        let prefix = format!("refs/remotes/{}/", remote_name);
+                        if target.starts_with(&prefix) {
+                            let branch_name = target.strip_prefix(&prefix).unwrap();
+                            found_default = Some(branch_name.to_string());
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(found_default)
+    }
+
+    fn find_local_tracking_main_branch(&self) -> Result<Option<String>> {
+        let branches = self.repo.branches(Some(git2::BranchType::Local))?;
+        
+        for branch_result in branches {
+            let (branch, _) = branch_result?;
+            if let Some(branch_name) = branch.name()? {
+                // Check if this branch tracks a remote main/master branch
+                if let Ok(upstream) = branch.upstream() {
+                    if let Some(upstream_name) = upstream.name()? {
+                        // Check if upstream is a main branch (contains main, master, etc.)
+                        let upstream_lower = upstream_name.to_lowercase();
+                        if upstream_lower.contains("main") || upstream_lower.contains("master") {
+                            return Ok(Some(branch_name.to_string()));
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
 
     #[allow(dead_code)]
     pub fn get_all_branches(&self) -> Result<Vec<String>> {

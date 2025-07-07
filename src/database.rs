@@ -37,6 +37,9 @@ impl DatabaseManager {
             return Ok(());
         }
         
+        // Terminate existing connections to the template database before creating
+        self.terminate_connections_to_database(&client, &self.config.database.template_database).await?;
+        
         let query = format!(
             "CREATE DATABASE {} WITH TEMPLATE {}",
             escape_identifier(&db_name),
@@ -98,6 +101,55 @@ impl DatabaseManager {
             .context("Failed to check if database exists")?;
         
         Ok(!rows.is_empty())
+    }
+
+    async fn terminate_connections_to_database(&self, client: &Client, db_name: &str) -> Result<()> {
+        log::debug!("Terminating connections to database: {}", db_name);
+        
+        // Query to find ALL connections to the database (excluding our own)
+        let query = r#"
+            SELECT pid, usename, application_name, client_addr, state
+            FROM pg_stat_activity 
+            WHERE datname = $1 
+            AND pid != pg_backend_pid()
+        "#;
+        
+        let rows = client.query(query, &[&db_name]).await
+            .context("Failed to query active connections")?;
+        
+        if rows.is_empty() {
+            log::debug!("No connections found to database: {}", db_name);
+            return Ok(());
+        }
+        
+        println!("⚠️  Found {} connection(s) to database '{}', terminating them...", rows.len(), db_name);
+        
+        // Terminate each connection
+        for row in rows {
+            let pid: i32 = row.get(0);
+            let username: String = row.get(1);
+            let app_name: Option<String> = row.get(2);
+            let _client_addr: Option<std::net::IpAddr> = row.get(3);
+            let state: String = row.get(4);
+            
+            println!(
+                "💀 Terminating connection: PID={}, User={}, State={}, App={:?}", 
+                pid, username, state, app_name
+            );
+            
+            let terminate_query = "SELECT pg_terminate_backend($1)";
+            match client.query(terminate_query, &[&pid]).await {
+                Ok(_) => println!("✅ Successfully terminated connection PID: {}", pid),
+                Err(e) => println!("❌ Failed to terminate connection PID {}: {}", pid, e),
+            }
+        }
+        
+        // Give more time for connections to close
+        println!("⏱️  Waiting for connections to close...");
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        
+        println!("🔄 Finished terminating connections to database: {}", db_name);
+        Ok(())
     }
 
     pub async fn cleanup_old_branches(&self, max_count: usize) -> Result<()> {

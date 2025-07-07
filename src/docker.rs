@@ -3,6 +3,7 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
+use std::process::Command;
 
 #[derive(Debug, Clone)]
 pub struct PostgresConfig {
@@ -17,6 +18,7 @@ pub struct PostgresConfig {
 struct DockerComposeService {
     environment: Option<DockerComposeEnvironment>,
     ports: Option<DockerComposePorts>,
+    env_file: Option<DockerComposeEnvFile>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -51,6 +53,13 @@ enum DockerComposeEnvironment {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum DockerComposeEnvFile {
+    Single(String),
+    List(Vec<String>),
+}
+
+#[derive(Debug, Deserialize)]
 struct DockerComposeFile {
     services: Option<HashMap<String, DockerComposeService>>,
 }
@@ -73,6 +82,14 @@ pub fn find_docker_compose_files() -> Vec<String> {
 }
 
 pub fn parse_postgres_config_from_files(filenames: &[String]) -> Result<Option<PostgresConfig>> {
+    // First try using docker compose config for accurate resolution
+    if let Some(config) = try_parse_with_docker_compose()? {
+        return Ok(Some(config));
+    }
+    
+    // Fall back to manual file parsing
+    log::debug!("Docker compose not available or failed, falling back to manual parsing");
+    
     let mut combined_config = PostgresConfig {
         host: None,
         port: None,
@@ -113,6 +130,104 @@ pub fn parse_postgres_config_from_files(filenames: &[String]) -> Result<Option<P
     }
 }
 
+fn try_parse_with_docker_compose() -> Result<Option<PostgresConfig>> {
+    // Check if docker compose command is available
+    let docker_compose_available = Command::new("docker")
+        .args(&["compose", "--version"])
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false);
+
+    if !docker_compose_available {
+        log::debug!("Docker compose command not available");
+        return Ok(None);
+    }
+
+    log::debug!("Using docker compose config to resolve configuration");
+
+    // Run docker compose config to get resolved configuration
+    let output = Command::new("docker")
+        .args(&["compose", "config"])
+        .output()
+        .context("Failed to run docker compose config")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        log::debug!("docker compose config failed: {}", stderr);
+        return Ok(None);
+    }
+
+    let config_yaml = String::from_utf8(output.stdout)
+        .context("Failed to parse docker compose config output as UTF-8")?;
+
+    log::debug!("Successfully got docker compose config output");
+
+    // Parse the resolved configuration
+    parse_postgres_config_from_resolved_yaml(&config_yaml)
+}
+
+fn parse_postgres_config_from_resolved_yaml(yaml_content: &str) -> Result<Option<PostgresConfig>> {
+    let compose: DockerComposeFile = serde_yaml::from_str(yaml_content)
+        .context("Failed to parse docker compose config output as YAML")?;
+
+    let services = match compose.services {
+        Some(services) => services,
+        None => return Ok(None),
+    };
+
+    // Look for PostgreSQL-related services (postgres, postgresql, db, database, etc.)
+    let postgres_service_names = vec!["postgres", "postgresql", "db", "database", "pg"];
+    
+    for (service_name, service) in &services {
+        let service_name_lower = service_name.to_lowercase();
+        
+        // Check if this looks like a postgres service
+        let is_postgres_service = postgres_service_names.iter()
+            .any(|&pg_name| service_name_lower.contains(pg_name));
+
+        if !is_postgres_service {
+            log::debug!("Skipping service '{}' - not a PostgreSQL service", service_name);
+            continue;
+        }
+        
+        log::debug!("Found PostgreSQL service in resolved config: {}", service_name);
+
+        // For resolved config, all environment variables should be in the environment section
+        if let Some(ref environment) = service.environment {
+            let env_vars = extract_environment_variables(environment);
+            
+            if !env_vars.is_empty() {
+                log::debug!("Found {} environment variables for service '{}'", env_vars.len(), service_name);
+                for (key, value) in &env_vars {
+                    if key.to_uppercase().contains("POSTGRES") {
+                        log::debug!("  PostgreSQL env var: {}={}", key, value);
+                    }
+                }
+                
+                let mut postgres_config = extract_postgres_config_from_env(&env_vars);
+                
+                // Check port mappings to find the actual exposed port
+                if let Some(exposed_port) = extract_exposed_postgres_port(&service.ports) {
+                    postgres_config.port = Some(exposed_port);
+                }
+                
+                if postgres_config.host.is_some() || postgres_config.port.is_some() || 
+                   postgres_config.user.is_some() || postgres_config.password.is_some() ||
+                   postgres_config.database.is_some() {
+                    log::debug!("Successfully extracted PostgreSQL config from resolved service '{}'", service_name);
+                    return Ok(Some(postgres_config));
+                } else {
+                    log::debug!("No PostgreSQL configuration found in resolved service '{}'", service_name);
+                }
+            } else {
+                log::debug!("No environment variables found for resolved service '{}'", service_name);
+            }
+        }
+    }
+
+    Ok(None)
+}
+
 fn parse_postgres_config_from_file(filename: &str) -> Result<Option<PostgresConfig>> {
     let content = fs::read_to_string(filename)
         .with_context(|| format!("Failed to read {}", filename))?;
@@ -136,12 +251,36 @@ fn parse_postgres_config_from_file(filename: &str) -> Result<Option<PostgresConf
             .any(|&pg_name| service_name_lower.contains(pg_name));
 
         if !is_postgres_service {
+            log::debug!("Skipping service '{}' - not a PostgreSQL service", service_name);
             continue;
         }
+        
+        log::debug!("Found PostgreSQL service: {}", service_name);
 
+        // Collect environment variables from both environment and env_file
+        let mut all_env_vars = HashMap::new();
+        
+        // First, add variables from environment section
         if let Some(ref environment) = service.environment {
             let env_vars = extract_environment_variables(environment);
-            let mut postgres_config = extract_postgres_config_from_env(&env_vars);
+            all_env_vars.extend(env_vars);
+        }
+        
+        // Then, add variables from env_file(s) - these can override environment section
+        if let Some(ref env_file) = service.env_file {
+            let env_file_vars = extract_environment_from_files(env_file);
+            all_env_vars.extend(env_file_vars);
+        }
+        
+        if !all_env_vars.is_empty() {
+            log::debug!("Found {} environment variables for service '{}'", all_env_vars.len(), service_name);
+            for (key, value) in &all_env_vars {
+                if key.to_uppercase().contains("POSTGRES") {
+                    log::debug!("  PostgreSQL env var: {}={}", key, value);
+                }
+            }
+            
+            let mut postgres_config = extract_postgres_config_from_env(&all_env_vars);
             
             // Check port mappings to find the actual exposed port
             if let Some(exposed_port) = extract_exposed_postgres_port(&service.ports) {
@@ -151,8 +290,13 @@ fn parse_postgres_config_from_file(filename: &str) -> Result<Option<PostgresConf
             if postgres_config.host.is_some() || postgres_config.port.is_some() || 
                postgres_config.user.is_some() || postgres_config.password.is_some() ||
                postgres_config.database.is_some() {
+                log::debug!("Successfully extracted PostgreSQL config from service '{}'", service_name);
                 return Ok(Some(postgres_config));
+            } else {
+                log::debug!("No PostgreSQL configuration found in service '{}'", service_name);
             }
+        } else {
+            log::debug!("No environment variables found for service '{}'", service_name);
         }
     }
 
@@ -166,8 +310,10 @@ fn extract_environment_variables(environment: &DockerComposeEnvironment) -> Hash
         DockerComposeEnvironment::List(list) => {
             for item in list {
                 if let Some((key, value)) = item.split_once('=') {
+                    // Format: KEY=VALUE
                     env_vars.insert(key.to_string(), value.to_string());
                 }
+                // Note: For format "KEY" (without value), we skip it here and let env_file provide the value
             }
         }
         DockerComposeEnvironment::Map(map) => {
@@ -177,6 +323,44 @@ fn extract_environment_variables(environment: &DockerComposeEnvironment) -> Hash
         }
     }
 
+    env_vars
+}
+
+fn extract_environment_from_files(env_file: &DockerComposeEnvFile) -> HashMap<String, String> {
+    let mut env_vars = HashMap::new();
+    
+    let files = match env_file {
+        DockerComposeEnvFile::Single(file) => vec![file.clone()],
+        DockerComposeEnvFile::List(files) => files.clone(),
+    };
+    
+    for file_path in files {
+        match fs::read_to_string(&file_path) {
+            Ok(content) => {
+                log::debug!("Reading env file: {}", file_path);
+                for line in content.lines() {
+                    let line = line.trim();
+                    
+                    // Skip empty lines and comments
+                    if line.is_empty() || line.starts_with('#') {
+                        continue;
+                    }
+                    
+                    // Parse KEY=VALUE format
+                    if let Some((key, value)) = line.split_once('=') {
+                        let key = key.trim();
+                        let value = value.trim();
+                        log::debug!("Found env var from file {}: {}={}", file_path, key, value);
+                        env_vars.insert(key.to_string(), value.to_string());
+                    }
+                }
+            }
+            Err(e) => {
+                log::debug!("Could not read env file {}: {}", file_path, e);
+            }
+        }
+    }
+    
     env_vars
 }
 

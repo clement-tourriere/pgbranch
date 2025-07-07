@@ -7,6 +7,7 @@ mod git;
 mod cli;
 mod docker;
 mod post_commands;
+mod local_state;
 
 use cli::Commands;
 

@@ -5,6 +5,7 @@ use crate::database::DatabaseManager;
 use crate::git::GitRepository;
 use crate::docker;
 use crate::post_commands::PostCommandExecutor;
+use crate::local_state::LocalStateManager;
 
 #[derive(Subcommand)]
 pub enum Commands {
@@ -91,6 +92,13 @@ pub async fn handle_command(cmd: Commands) -> Result<()> {
         (cfg, path)
     };
     
+    // Initialize local state manager for commands that need it
+    let mut local_state = if requires_config {
+        Some(LocalStateManager::new()?)
+    } else {
+        None
+    };
+    
     let db_manager = DatabaseManager::new(config.clone());
     
     match cmd {
@@ -118,12 +126,13 @@ pub async fn handle_command(cmd: Commands) -> Result<()> {
                     
                     println!("📋 PostgreSQL branches:");
                     for branch in branches {
-                        let is_current = match config.get_current_branch() {
+                        let current_branch = get_current_branch_with_default(&local_state, &config_path, &config);
+                        let is_current = match current_branch {
                             Some(current) => {
                                 if current == "_main" && branch == "main" {
                                     true
                                 } else {
-                                    current == &branch
+                                    current == branch
                                 }
                             }
                             None => false
@@ -140,20 +149,22 @@ pub async fn handle_command(cmd: Commands) -> Result<()> {
                     }
                 }
                 Err(e) => {
-                    // Even when database connection fails, show main and current branch from config
+                    // Even when database connection fails, show main and current branch from local state
                     println!("⚠️  Could not list database branches: {}", e);
                     println!("📋 PostgreSQL branches:");
                     
+                    let current_branch = get_current_branch_with_default(&local_state, &config_path, &config);
+                    
                     // Always show main branch
-                    let main_marker = if config.get_current_branch() == Some(&"_main".to_string()) {
+                    let main_marker = if current_branch == Some("_main".to_string()) {
                         "* "
                     } else {
                         "  "
                     };
                     println!("{}{} (main)", main_marker, config.database.template_database);
                     
-                    // Show current branch from config if it's not main
-                    if let Some(current) = config.get_current_branch() {
+                    // Show current branch from local state if it's not main
+                    if let Some(current) = current_branch {
                         if current != "_main" {
                             println!("* {}", current);
                         }
@@ -240,7 +251,7 @@ pub async fn handle_command(cmd: Commands) -> Result<()> {
             perform_system_check(&config, &db_manager, config_path).await?;
         }
         Commands::GitHook => {
-            handle_git_hook(&mut config, &db_manager).await?;
+            handle_git_hook(&mut config, &db_manager, &mut local_state, &config_path).await?;
         }
         Commands::Templates { branch_name } => {
             let example_branch = branch_name.unwrap_or_else(|| "feature/example-branch".to_string());
@@ -256,11 +267,11 @@ pub async fn handle_command(cmd: Commands) -> Result<()> {
         }
         Commands::Switch { branch_name, template } => {
             if template {
-                handle_switch_to_main(&mut config, &db_manager).await?;
+                handle_switch_to_main(&mut config, &db_manager, &mut local_state, &config_path).await?;
             } else if let Some(branch) = branch_name {
-                handle_switch_command(&mut config, &db_manager, &branch).await?;
+                handle_switch_command(&mut config, &db_manager, &branch, &mut local_state, &config_path).await?;
             } else {
-                handle_interactive_switch(&mut config, &db_manager).await?;
+                handle_interactive_switch(&mut config, &db_manager, &mut local_state, &config_path).await?;
             }
         }
         Commands::TestSwitch { branch_name } => {
@@ -464,7 +475,7 @@ fn check_git_hooks() -> Result<bool> {
     }
 }
 
-async fn handle_git_hook(config: &mut Config, db_manager: &DatabaseManager) -> Result<()> {
+async fn handle_git_hook(config: &mut Config, db_manager: &DatabaseManager, local_state: &mut Option<LocalStateManager>, config_path: &Option<std::path::PathBuf>) -> Result<()> {
     let git_repo = GitRepository::new(".")?;
     
     if let Some(current_git_branch) = git_repo.get_current_branch()? {
@@ -474,11 +485,11 @@ async fn handle_git_hook(config: &mut Config, db_manager: &DatabaseManager) -> R
         if config.should_switch_on_branch(&current_git_branch) {
             // If switching to main git branch, use main database
             if current_git_branch == config.git.main_branch {
-                handle_switch_to_main(config, db_manager).await?;
+                handle_switch_to_main(config, db_manager, local_state, config_path).await?;
             } else {
                 // For other branches, check if we should create them and switch
                 if config.should_create_branch(&current_git_branch) {
-                    handle_switch_command(config, db_manager, &current_git_branch).await?;
+                    handle_switch_command(config, db_manager, &current_git_branch, local_state, config_path).await?;
                 } else {
                     log::info!("Git branch {} configured not to create PostgreSQL branch", current_git_branch);
                 }
@@ -491,16 +502,16 @@ async fn handle_git_hook(config: &mut Config, db_manager: &DatabaseManager) -> R
     Ok(())
 }
 
-async fn handle_interactive_switch(config: &mut Config, db_manager: &DatabaseManager) -> Result<()> {
+async fn handle_interactive_switch(config: &mut Config, db_manager: &DatabaseManager, local_state: &mut Option<LocalStateManager>, config_path: &Option<std::path::PathBuf>) -> Result<()> {
     // Get available branches
     let mut branches = match db_manager.list_database_branches().await {
         Ok(branches) => branches,
         Err(_) => {
-            // If database connection fails, show current branch from config (if not main)
+            // If database connection fails, show current branch from local state or smart default (if not main)
             let mut fallback_branches = Vec::new();
-            if let Some(current) = config.get_current_branch() {
+            if let Some(current) = get_current_branch_with_default(local_state, config_path, config) {
                 if current != "_main" {
-                    fallback_branches.push(current.clone());
+                    fallback_branches.push(current);
                 }
             }
             fallback_branches
@@ -512,12 +523,13 @@ async fn handle_interactive_switch(config: &mut Config, db_manager: &DatabaseMan
     
     // Create branch items with display info
     let branch_items: Vec<BranchItem> = branches.iter().map(|branch| {
-        let is_current = match config.get_current_branch() {
+        let current_branch = get_current_branch_with_default(local_state, config_path, config);
+        let is_current = match current_branch {
             Some(current) => {
                 if current == "_main" && branch == "main" {
                     true
                 } else {
-                    current == branch
+                    current == *branch
                 }
             }
             None => false
@@ -541,9 +553,9 @@ async fn handle_interactive_switch(config: &mut Config, db_manager: &DatabaseMan
     match run_interactive_selector(branch_items) {
         Ok(selected_branch) => {
             if selected_branch == "main" {
-                handle_switch_to_main(config, db_manager).await?;
+                handle_switch_to_main(config, db_manager, local_state, config_path).await?;
             } else {
-                handle_switch_command(config, db_manager, &selected_branch).await?;
+                handle_switch_command(config, db_manager, &selected_branch, local_state, config_path).await?;
             }
         }
         Err(e) => {
@@ -608,19 +620,14 @@ fn run_interactive_selector(items: Vec<BranchItem>) -> Result<String, inquire::I
     Ok(items[selected_index].name.clone())
 }
 
-async fn handle_switch_command(config: &mut Config, db_manager: &DatabaseManager, branch_name: &str) -> Result<()> {
+async fn handle_switch_command(config: &mut Config, db_manager: &DatabaseManager, branch_name: &str, local_state: &mut Option<LocalStateManager>, config_path: &Option<std::path::PathBuf>) -> Result<()> {
     // Normalize the branch name (feature/auth → feature_auth)
     let normalized_branch = config.get_normalized_branch_name(branch_name);
     
     println!("🔄 Switching to PostgreSQL branch: {}", normalized_branch);
     
-    // Update current branch in config first (so it persists even if DB operations fail)
-    config.set_current_branch(Some(normalized_branch.clone()));
-    
-    // Save config with updated current branch
-    if let Some(config_path) = Config::find_config_file()? {
-        config.save_to_file(&config_path)?;
-    }
+    // Update current branch in local state first (so it persists even if DB operations fail)
+    set_current_branch(local_state, config_path, Some(normalized_branch.clone()))?;
     
     // Try database operations (non-fatal if they fail)
     match db_manager.list_database_branches().await {
@@ -654,18 +661,13 @@ async fn handle_switch_command(config: &mut Config, db_manager: &DatabaseManager
     Ok(())
 }
 
-async fn handle_switch_to_main(config: &mut Config, _db_manager: &DatabaseManager) -> Result<()> {
+async fn handle_switch_to_main(config: &mut Config, _db_manager: &DatabaseManager, local_state: &mut Option<LocalStateManager>, config_path: &Option<std::path::PathBuf>) -> Result<()> {
     let main_name = "_main";
     
     println!("🔄 Switching to main database");
     
-    // Update current branch in config to a special main marker
-    config.set_current_branch(Some(main_name.to_string()));
-    
-    // Save config with updated current branch
-    if let Some(config_path) = Config::find_config_file()? {
-        config.save_to_file(&config_path)?;
-    }
+    // Update current branch in local state to a special main marker
+    set_current_branch(local_state, config_path, Some(main_name.to_string()))?;
     
     println!("✅ Switched to main database: {}", config.database.template_database);
     
@@ -686,8 +688,8 @@ async fn handle_test_switch_command(config: &mut Config, branch_name: &str) -> R
     println!("🧪 Testing switch to PostgreSQL branch: {}", normalized_branch);
     println!("💡 This simulates branch switching without database operations\n");
     
-    // Update current branch in config (but don't save for test)
-    config.set_current_branch(Some(normalized_branch.clone()));
+    // Note: For test mode, we don't update local state
+    // The normalized branch is only shown for demonstration
     
     println!("✅ Updated current branch to: {}", normalized_branch);
     
@@ -698,5 +700,71 @@ async fn handle_test_switch_command(config: &mut Config, branch_name: &str) -> R
         executor.execute_all_post_commands().await?;
     }
     
+    Ok(())
+}
+
+// Helper functions for current branch management with local state
+fn get_current_branch(local_state: &Option<LocalStateManager>, config_path: &Option<std::path::PathBuf>) -> Option<String> {
+    if let (Some(state_manager), Some(path)) = (local_state, config_path) {
+        state_manager.get_current_branch(path)
+    } else {
+        None
+    }
+}
+
+fn get_current_branch_with_default(
+    local_state: &Option<LocalStateManager>, 
+    config_path: &Option<std::path::PathBuf>,
+    config: &Config
+) -> Option<String> {
+    // First check if we have local state
+    if let Some(current) = get_current_branch(local_state, config_path) {
+        return Some(current);
+    }
+    
+    // No local state found, try to detect smart default
+    detect_default_current_branch(config)
+}
+
+
+fn detect_default_current_branch(config: &Config) -> Option<String> {
+    // Try to get current Git branch to make intelligent default
+    match GitRepository::new(".") {
+        Ok(git_repo) => {
+            if let Ok(Some(current_git_branch)) = git_repo.get_current_branch() {
+                log::debug!("Detecting default current branch from Git branch: {}", current_git_branch);
+                
+                // If on main Git branch, default to main database
+                if current_git_branch == config.git.main_branch {
+                    log::debug!("On main Git branch, defaulting to main database");
+                    return Some("_main".to_string());
+                }
+                
+                // If current Git branch would create a database branch, default to that
+                if config.should_create_branch(&current_git_branch) {
+                    let normalized_branch = config.get_normalized_branch_name(&current_git_branch);
+                    log::debug!("Git branch matches create filter, defaulting to: {}", normalized_branch);
+                    return Some(normalized_branch);
+                }
+                
+                // Git branch exists but doesn't match filters, default to main
+                log::debug!("Git branch doesn't match filters, defaulting to main database");
+                return Some("_main".to_string());
+            }
+        }
+        Err(e) => {
+            log::debug!("Could not access Git repository: {}", e);
+        }
+    }
+    
+    // Fallback to main database if Git detection fails
+    log::debug!("Git detection failed, defaulting to main database");
+    Some("_main".to_string())
+}
+
+fn set_current_branch(local_state: &mut Option<LocalStateManager>, config_path: &Option<std::path::PathBuf>, branch: Option<String>) -> Result<()> {
+    if let (Some(state_manager), Some(path)) = (local_state, config_path) {
+        state_manager.set_current_branch(path, branch)?;
+    }
     Ok(())
 }

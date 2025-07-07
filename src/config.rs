@@ -9,7 +9,8 @@ pub struct Config {
     pub git: GitConfig,
     pub behavior: BehaviorConfig,
     pub post_commands: Vec<PostCommand>,
-    pub current_branch: Option<String>,
+    #[serde(skip)]
+    pub current_branch: Option<String>, // Deprecated - kept for backward compatibility, not serialized
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -152,7 +153,7 @@ impl Default for Config {
                 naming_strategy: NamingStrategy::Prefix,
             },
             post_commands: vec![],
-            current_branch: None,
+            current_branch: None, // Deprecated field, always None for new configs
         }
     }
 }
@@ -172,8 +173,12 @@ impl Config {
         let content = fs::read_to_string(path)
             .with_context(|| format!("Failed to read config file: {}", path.display()))?;
         
-        let config: Config = serde_yaml::from_str(&content)
+        let mut config: Config = serde_yaml::from_str(&content)
             .with_context(|| format!("Failed to parse YAML config file: {}", path.display()))?;
+        
+        // Handle backward compatibility: if current_branch was loaded, ignore it
+        // The local state manager will handle current branch tracking
+        config.current_branch = None;
         
         Ok(config)
     }
@@ -358,10 +363,15 @@ impl Config {
         result
     }
 
+    // Deprecated methods - current branch is now managed by LocalStateManager
+    #[deprecated(since = "0.1.0", note = "Use LocalStateManager instead")]
+    #[allow(dead_code)]
     pub fn get_current_branch(&self) -> Option<&String> {
         self.current_branch.as_ref()
     }
 
+    #[deprecated(since = "0.1.0", note = "Use LocalStateManager instead")]
+    #[allow(dead_code)]
     pub fn set_current_branch(&mut self, branch_name: Option<String>) {
         self.current_branch = branch_name;
     }

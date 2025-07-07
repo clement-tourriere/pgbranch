@@ -43,6 +43,9 @@ rpassword = { version = "7.4", default-features = false }
 # Terminal UI for interactive selection
 inquire = { version = "0.7", default-features = false, features = ["crossterm"] }
 
+# Date/time handling for local state timestamps
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+
 [dev-dependencies]
 tempfile = "3.20"
 

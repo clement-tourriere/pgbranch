@@ -25,6 +25,47 @@ The tool is configured via a `.pgbranch` file in your Git repository root. This 
 - Branch naming conventions
 - Git hook preferences
 
+## Local Configuration System
+
+pgbranch supports a comprehensive local configuration system with three levels of precedence:
+
+### Configuration Hierarchy (highest to lowest):
+1. **Environment Variables** - Quick toggles and overrides
+2. **Local Config File** (`.pgbranch.local.yml`) - Project-specific local overrides  
+3. **Committed Config** (`.pgbranch.yml`) - Team shared configuration
+
+### Environment Variables:
+- `PGBRANCH_DISABLED=true` - Completely disable pgbranch
+- `PGBRANCH_SKIP_HOOKS=true` - Skip Git hook execution
+- `PGBRANCH_AUTO_CREATE=false` - Override auto_create_on_branch
+- `PGBRANCH_AUTO_SWITCH=false` - Override auto_switch_on_branch
+- `PGBRANCH_BRANCH_FILTER_REGEX=...` - Override branch filtering
+- `PGBRANCH_DISABLED_BRANCHES=main,release/*` - Disable for specific branches
+- `PGBRANCH_CURRENT_BRANCH_DISABLED=true` - Disable for current branch only
+- `PGBRANCH_DATABASE_HOST=...` - Override database connection settings
+
+### Local Config File:
+Create `.pgbranch.local.yml` in your project root to override team settings locally:
+
+```yaml
+# Example .pgbranch.local.yml
+disabled: false
+disabled_branches:
+  - "feature/*"
+  - hotfix
+database:
+  host: localhost
+  port: 5433
+  database_prefix: dev_prefix
+git:
+  auto_switch_on_branch: false
+  main_branch: develop
+```
+
+### Commands:
+- `pgbranch config-show` - Display effective configuration with all overrides
+- `pgbranch init` - Suggests adding local config to gitignore
+
 ## Development Commands
 When working on this project, use these commands:
 

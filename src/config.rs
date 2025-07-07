@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::env;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -115,6 +116,81 @@ pub enum NamingStrategy {
     Suffix,
     #[serde(rename = "replace")]
     Replace,
+}
+
+// Local configuration that can override the main config
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct LocalConfig {
+    pub database: Option<LocalDatabaseConfig>,
+    pub git: Option<LocalGitConfig>,
+    pub behavior: Option<LocalBehaviorConfig>,
+    pub post_commands: Option<Vec<PostCommand>>,
+    pub disabled: Option<bool>,
+    pub disabled_branches: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct LocalDatabaseConfig {
+    pub host: Option<String>,
+    pub port: Option<u16>,
+    pub user: Option<String>,
+    pub password: Option<String>,
+    pub template_database: Option<String>,
+    pub database_prefix: Option<String>,
+    pub auth: Option<LocalAuthConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct LocalAuthConfig {
+    pub methods: Option<Vec<AuthMethod>>,
+    pub pgpass_file: Option<String>,
+    pub service_name: Option<String>,
+    pub prompt_for_password: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct LocalGitConfig {
+    pub auto_create_on_branch: Option<bool>,
+    pub auto_switch_on_branch: Option<bool>,
+    pub main_branch: Option<String>,
+    pub auto_create_branch_filter: Option<String>,
+    pub branch_filter_regex: Option<String>,
+    pub exclude_branches: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct LocalBehaviorConfig {
+    pub auto_cleanup: Option<bool>,
+    pub max_branches: Option<usize>,
+    pub naming_strategy: Option<NamingStrategy>,
+}
+
+// Environment variable configuration
+#[derive(Debug, Clone, Default)]
+pub struct EnvConfig {
+    pub disabled: Option<bool>,
+    pub skip_hooks: Option<bool>,
+    pub auto_create: Option<bool>,
+    pub auto_switch: Option<bool>,
+    pub branch_filter_regex: Option<String>,
+    pub disabled_branches: Option<Vec<String>>,
+    pub current_branch_disabled: Option<bool>,
+    pub database_host: Option<String>,
+    pub database_port: Option<u16>,
+    pub database_user: Option<String>,
+    pub database_password: Option<String>,
+    pub database_prefix: Option<String>,
+}
+
+// The effective configuration after merging all sources
+#[derive(Debug, Clone)]
+pub struct EffectiveConfig {
+    pub config: Config,
+    pub local_config: Option<LocalConfig>,
+    pub env_config: EnvConfig,
+    pub disabled: bool,
+    pub skip_hooks: bool,
+    pub current_branch_disabled: bool,
 }
 
 impl Default for Config {
@@ -378,6 +454,295 @@ impl Config {
 
     pub fn get_normalized_branch_name(&self, branch_name: &str) -> String {
         Self::sanitize_branch_name(branch_name)
+    }
+
+    pub fn load_effective_config_with_path_info() -> Result<(EffectiveConfig, Option<std::path::PathBuf>)> {
+        // Load main config
+        let (config, config_path) = Self::load_with_path_info()?;
+        
+        // Load local config if it exists - check in current directory if no main config path
+        let local_config = if let Some(ref path) = config_path {
+            LocalConfig::load_from_project_dir(path.parent().unwrap())?
+        } else {
+            // No main config found, but check current directory for local config
+            LocalConfig::load_from_project_dir(&std::env::current_dir()?)?
+        };
+        
+        // Load environment config
+        let env_config = EnvConfig::load_from_env()?;
+        
+        // Create effective config
+        let effective_config = EffectiveConfig::new(config, local_config, env_config)?;
+        
+        Ok((effective_config, config_path))
+    }
+}
+
+impl LocalConfig {
+    pub fn load_from_project_dir(project_dir: &Path) -> Result<Option<Self>> {
+        let local_config_path = project_dir.join(".pgbranch.local.yml");
+        
+        if !local_config_path.exists() {
+            return Ok(None);
+        }
+        
+        let content = fs::read_to_string(&local_config_path)
+            .with_context(|| format!("Failed to read local config file: {}", local_config_path.display()))?;
+        
+        let local_config: LocalConfig = serde_yaml::from_str(&content)
+            .with_context(|| format!("Failed to parse local config file: {}", local_config_path.display()))?;
+        
+        log::debug!("Loaded local config from: {}", local_config_path.display());
+        Ok(Some(local_config))
+    }
+    
+}
+
+impl EnvConfig {
+    pub fn load_from_env() -> Result<Self> {
+        let mut env_config = EnvConfig::default();
+        
+        // Parse boolean environment variables
+        env_config.disabled = Self::parse_bool_env("PGBRANCH_DISABLED")?;
+        env_config.skip_hooks = Self::parse_bool_env("PGBRANCH_SKIP_HOOKS")?;
+        env_config.auto_create = Self::parse_bool_env("PGBRANCH_AUTO_CREATE")?;
+        env_config.auto_switch = Self::parse_bool_env("PGBRANCH_AUTO_SWITCH")?;
+        env_config.current_branch_disabled = Self::parse_bool_env("PGBRANCH_CURRENT_BRANCH_DISABLED")?;
+        
+        // Parse string environment variables
+        env_config.branch_filter_regex = env::var("PGBRANCH_BRANCH_FILTER_REGEX").ok();
+        env_config.database_host = env::var("PGBRANCH_DATABASE_HOST").ok();
+        env_config.database_user = env::var("PGBRANCH_DATABASE_USER").ok();
+        env_config.database_password = env::var("PGBRANCH_DATABASE_PASSWORD").ok();
+        env_config.database_prefix = env::var("PGBRANCH_DATABASE_PREFIX").ok();
+        
+        // Parse numeric environment variables
+        env_config.database_port = env::var("PGBRANCH_DATABASE_PORT").ok()
+            .and_then(|s| s.parse().ok());
+        
+        // Parse comma-separated list environment variables
+        env_config.disabled_branches = env::var("PGBRANCH_DISABLED_BRANCHES").ok()
+            .map(|s| s.split(',').map(|s| s.trim().to_string()).collect());
+        
+        Ok(env_config)
+    }
+    
+    fn parse_bool_env(key: &str) -> Result<Option<bool>> {
+        match env::var(key) {
+            Ok(value) => {
+                match value.to_lowercase().as_str() {
+                    "true" | "1" | "yes" | "on" => Ok(Some(true)),
+                    "false" | "0" | "no" | "off" => Ok(Some(false)),
+                    _ => Err(anyhow::anyhow!("Invalid boolean value for {}: '{}'. Use true/false, 1/0, yes/no, or on/off", key, value))
+                }
+            }
+            Err(_) => Ok(None)
+        }
+    }
+}
+
+impl EffectiveConfig {
+    pub fn new(config: Config, local_config: Option<LocalConfig>, env_config: EnvConfig) -> Result<Self> {
+        // Determine global disabled state
+        let disabled = env_config.disabled.unwrap_or(
+            local_config.as_ref().and_then(|c| c.disabled).unwrap_or(false)
+        );
+        
+        // Determine skip hooks state
+        let skip_hooks = env_config.skip_hooks.unwrap_or(false);
+        
+        // Determine current branch disabled state
+        let current_branch_disabled = env_config.current_branch_disabled.unwrap_or(false);
+        
+        Ok(EffectiveConfig {
+            config,
+            local_config,
+            env_config,
+            disabled,
+            skip_hooks,
+            current_branch_disabled,
+        })
+    }
+    
+    pub fn is_disabled(&self) -> bool {
+        self.disabled
+    }
+    
+    pub fn should_skip_hooks(&self) -> bool {
+        self.skip_hooks
+    }
+    
+    pub fn is_current_branch_disabled(&self) -> bool {
+        self.current_branch_disabled
+    }
+    
+    pub fn is_branch_disabled(&self, branch_name: &str) -> bool {
+        // Check environment disabled branches
+        if let Some(ref disabled_branches) = self.env_config.disabled_branches {
+            if Self::branch_matches_patterns(branch_name, disabled_branches) {
+                return true;
+            }
+        }
+        
+        // Check local config disabled branches
+        if let Some(ref local_config) = self.local_config {
+            if let Some(ref disabled_branches) = local_config.disabled_branches {
+                if Self::branch_matches_patterns(branch_name, disabled_branches) {
+                    return true;
+                }
+            }
+        }
+        
+        false
+    }
+    
+    fn branch_matches_patterns(branch_name: &str, patterns: &[String]) -> bool {
+        patterns.iter().any(|pattern| {
+            if pattern.contains('*') {
+                // Simple glob pattern matching
+                let regex_pattern = pattern.replace('*', ".*");
+                match regex::Regex::new(&regex_pattern) {
+                    Ok(re) => re.is_match(branch_name),
+                    Err(_) => false,
+                }
+            } else {
+                // Exact match
+                branch_name == pattern
+            }
+        })
+    }
+    
+    pub fn check_current_git_branch_disabled(&self) -> Result<bool> {
+        if self.is_current_branch_disabled() {
+            return Ok(true);
+        }
+        
+        // Get current Git branch and check if it's disabled
+        match crate::git::GitRepository::new(".") {
+            Ok(git_repo) => {
+                if let Ok(Some(current_branch)) = git_repo.get_current_branch() {
+                    Ok(self.is_branch_disabled(&current_branch))
+                } else {
+                    Ok(false)
+                }
+            }
+            Err(_) => Ok(false)
+        }
+    }
+    
+    pub fn should_exit_early(&self) -> Result<bool> {
+        if self.is_disabled() {
+            return Ok(true);
+        }
+        
+        self.check_current_git_branch_disabled()
+    }
+
+    pub fn get_merged_config(&self) -> Config {
+        let mut merged = self.config.clone();
+        
+        // Apply local config overrides
+        if let Some(ref local_config) = self.local_config {
+            if let Some(ref local_db) = local_config.database {
+                if let Some(ref host) = local_db.host {
+                    merged.database.host = host.clone();
+                }
+                if let Some(port) = local_db.port {
+                    merged.database.port = port;
+                }
+                if let Some(ref user) = local_db.user {
+                    merged.database.user = user.clone();
+                }
+                if let Some(ref password) = local_db.password {
+                    merged.database.password = Some(password.clone());
+                }
+                if let Some(ref template_db) = local_db.template_database {
+                    merged.database.template_database = template_db.clone();
+                }
+                if let Some(ref prefix) = local_db.database_prefix {
+                    merged.database.database_prefix = prefix.clone();
+                }
+                if let Some(ref auth) = local_db.auth {
+                    if let Some(ref methods) = auth.methods {
+                        merged.database.auth.methods = methods.clone();
+                    }
+                    if let Some(ref pgpass_file) = auth.pgpass_file {
+                        merged.database.auth.pgpass_file = Some(pgpass_file.clone());
+                    }
+                    if let Some(ref service_name) = auth.service_name {
+                        merged.database.auth.service_name = Some(service_name.clone());
+                    }
+                    if let Some(prompt_for_password) = auth.prompt_for_password {
+                        merged.database.auth.prompt_for_password = prompt_for_password;
+                    }
+                }
+            }
+            
+            if let Some(ref local_git) = local_config.git {
+                if let Some(auto_create) = local_git.auto_create_on_branch {
+                    merged.git.auto_create_on_branch = auto_create;
+                }
+                if let Some(auto_switch) = local_git.auto_switch_on_branch {
+                    merged.git.auto_switch_on_branch = auto_switch;
+                }
+                if let Some(ref main_branch) = local_git.main_branch {
+                    merged.git.main_branch = main_branch.clone();
+                }
+                if let Some(ref filter) = local_git.auto_create_branch_filter {
+                    merged.git.auto_create_branch_filter = Some(filter.clone());
+                }
+                if let Some(ref regex) = local_git.branch_filter_regex {
+                    merged.git.branch_filter_regex = Some(regex.clone());
+                }
+                if let Some(ref exclude_branches) = local_git.exclude_branches {
+                    merged.git.exclude_branches = exclude_branches.clone();
+                }
+            }
+            
+            if let Some(ref local_behavior) = local_config.behavior {
+                if let Some(auto_cleanup) = local_behavior.auto_cleanup {
+                    merged.behavior.auto_cleanup = auto_cleanup;
+                }
+                if let Some(max_branches) = local_behavior.max_branches {
+                    merged.behavior.max_branches = Some(max_branches);
+                }
+                if let Some(ref naming_strategy) = local_behavior.naming_strategy {
+                    merged.behavior.naming_strategy = naming_strategy.clone();
+                }
+            }
+            
+            if let Some(ref post_commands) = local_config.post_commands {
+                merged.post_commands = post_commands.clone();
+            }
+        }
+        
+        // Apply environment config overrides
+        if let Some(ref host) = self.env_config.database_host {
+            merged.database.host = host.clone();
+        }
+        if let Some(port) = self.env_config.database_port {
+            merged.database.port = port;
+        }
+        if let Some(ref user) = self.env_config.database_user {
+            merged.database.user = user.clone();
+        }
+        if let Some(ref password) = self.env_config.database_password {
+            merged.database.password = Some(password.clone());
+        }
+        if let Some(ref prefix) = self.env_config.database_prefix {
+            merged.database.database_prefix = prefix.clone();
+        }
+        if let Some(auto_create) = self.env_config.auto_create {
+            merged.git.auto_create_on_branch = auto_create;
+        }
+        if let Some(auto_switch) = self.env_config.auto_switch {
+            merged.git.auto_switch_on_branch = auto_switch;
+        }
+        if let Some(ref regex) = self.env_config.branch_filter_regex {
+            merged.git.branch_filter_regex = Some(regex.clone());
+        }
+        
+        merged
     }
 }
 

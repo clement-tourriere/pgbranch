@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::Subcommand;
-use crate::config::Config;
+use crate::config::{Config, EffectiveConfig};
 use crate::database::DatabaseManager;
 use crate::git::GitRepository;
 use crate::docker;
@@ -33,6 +33,8 @@ pub enum Commands {
     },
     #[command(about = "Show current configuration")]
     Config,
+    #[command(about = "Show effective configuration with precedence info")]
+    ConfigShow,
     #[command(about = "Install Git hooks")]
     InstallHooks,
     #[command(about = "Uninstall Git hooks")]
@@ -79,18 +81,28 @@ pub async fn handle_command(cmd: Commands) -> Result<()> {
         Commands::TestSwitch { .. }
     );
     
-    let (mut config, config_path) = if requires_config {
-        let (cfg, path) = Config::load_with_path_info()?;
-        if path.is_none() {
-            anyhow::bail!(
-                "No configuration file found. Please run 'pgbranch init' to create a .pgbranch.yml file first."
-            );
+    // Load effective configuration (includes local config and environment overrides)
+    let (effective_config, config_path) = Config::load_effective_config_with_path_info()?;
+    
+    // Early exit if pgbranch is disabled
+    if effective_config.should_exit_early()? {
+        if effective_config.is_disabled() {
+            log::debug!("pgbranch is globally disabled via configuration");
+        } else {
+            log::debug!("pgbranch is disabled for current branch");
         }
-        (cfg, path)
-    } else {
-        let (cfg, path) = Config::load_with_path_info()?;
-        (cfg, path)
-    };
+        return Ok(());
+    }
+    
+    // Check for required config file after checking if disabled
+    if requires_config && config_path.is_none() {
+        anyhow::bail!(
+            "No configuration file found. Please run 'pgbranch init' to create a .pgbranch.yml file first."
+        );
+    }
+    
+    // Get the merged configuration for normal operations
+    let mut config = effective_config.get_merged_config();
     
     // Initialize local state manager for commands that need it
     let mut local_state = if requires_config {
@@ -226,6 +238,20 @@ pub async fn handle_command(cmd: Commands) -> Result<()> {
             
             config.save_to_file(&config_path)?;
             println!("✅ Initialized pgbranch configuration at: {}", config_path.display());
+            
+            // Suggest adding local config to gitignore
+            let gitignore_path = std::env::current_dir()?.join(".gitignore");
+            if gitignore_path.exists() {
+                println!("\n💡 Suggestion: Add '.pgbranch.local.yml' to your .gitignore file to keep local overrides private:");
+                println!("   echo '.pgbranch.local.yml' >> .gitignore");
+            } else {
+                println!("\n💡 Suggestion: Create a .gitignore file and add '.pgbranch.local.yml' to keep local overrides private:");
+                println!("   echo '.pgbranch.local.yml' > .gitignore");
+            }
+            
+            println!("\n📖 You can create a .pgbranch.local.yml file to override settings locally without affecting the team.");
+            println!("   Example: Local database host, disabled branches, or development-specific settings.");
+            println!("   Run 'pgbranch config-show' to see effective configuration with all overrides.");
         }
         Commands::Cleanup { max_count } => {
             let max = max_count.unwrap_or(config.behavior.max_branches.unwrap_or(10));
@@ -236,6 +262,9 @@ pub async fn handle_command(cmd: Commands) -> Result<()> {
         Commands::Config => {
             println!("Current configuration:");
             println!("{}", serde_yaml::to_string(&config)?);
+        }
+        Commands::ConfigShow => {
+            show_effective_config(&effective_config)?;
         }
         Commands::InstallHooks => {
             let git_repo = GitRepository::new(".")?;
@@ -251,6 +280,11 @@ pub async fn handle_command(cmd: Commands) -> Result<()> {
             perform_system_check(&config, &db_manager, config_path).await?;
         }
         Commands::GitHook => {
+            // Check if hooks should be skipped
+            if effective_config.should_skip_hooks() {
+                log::debug!("Git hooks are disabled via configuration");
+                return Ok(());
+            }
             handle_git_hook(&mut config, &db_manager, &mut local_state, &config_path).await?;
         }
         Commands::Templates { branch_name } => {
@@ -766,5 +800,135 @@ fn set_current_branch(local_state: &mut Option<LocalStateManager>, config_path: 
     if let (Some(state_manager), Some(path)) = (local_state, config_path) {
         state_manager.set_current_branch(path, branch)?;
     }
+    Ok(())
+}
+
+fn show_effective_config(effective_config: &EffectiveConfig) -> Result<()> {
+    println!("🔧 Effective Configuration");
+    println!("==========================\n");
+    
+    // Show configuration status
+    println!("📊 Status:");
+    if effective_config.is_disabled() {
+        println!("  ❌ pgbranch is DISABLED globally");
+    } else {
+        println!("  ✅ pgbranch is enabled");
+    }
+    
+    if effective_config.should_skip_hooks() {
+        println!("  ❌ Git hooks are DISABLED");
+    } else {
+        println!("  ✅ Git hooks are enabled");
+    }
+    
+    if effective_config.is_current_branch_disabled() {
+        println!("  ❌ Current branch operations are DISABLED");
+    } else {
+        println!("  ✅ Current branch operations are enabled");
+    }
+    
+    // Check if current git branch is disabled
+    match effective_config.check_current_git_branch_disabled() {
+        Ok(true) => println!("  ❌ Current Git branch is DISABLED"),
+        Ok(false) => {
+            if let Ok(git_repo) = crate::git::GitRepository::new(".") {
+                if let Ok(Some(branch)) = git_repo.get_current_branch() {
+                    println!("  ✅ Current Git branch '{}' is enabled", branch);
+                } else {
+                    println!("  ⚠️  Could not determine current Git branch");
+                }
+            } else {
+                println!("  ⚠️  Not in a Git repository");
+            }
+        },
+        Err(e) => println!("  ⚠️  Error checking current branch: {}", e),
+    }
+    
+    println!();
+    
+    // Show environment variable overrides
+    println!("🌍 Environment Variable Overrides:");
+    let has_env_overrides = 
+        effective_config.env_config.disabled.is_some() ||
+        effective_config.env_config.skip_hooks.is_some() ||
+        effective_config.env_config.auto_create.is_some() ||
+        effective_config.env_config.auto_switch.is_some() ||
+        effective_config.env_config.branch_filter_regex.is_some() ||
+        effective_config.env_config.disabled_branches.is_some() ||
+        effective_config.env_config.current_branch_disabled.is_some() ||
+        effective_config.env_config.database_host.is_some() ||
+        effective_config.env_config.database_port.is_some() ||
+        effective_config.env_config.database_user.is_some() ||
+        effective_config.env_config.database_password.is_some() ||
+        effective_config.env_config.database_prefix.is_some();
+    
+    if !has_env_overrides {
+        println!("  (none)");
+    } else {
+        if let Some(disabled) = effective_config.env_config.disabled {
+            println!("  PGBRANCH_DISABLED: {}", disabled);
+        }
+        if let Some(skip_hooks) = effective_config.env_config.skip_hooks {
+            println!("  PGBRANCH_SKIP_HOOKS: {}", skip_hooks);
+        }
+        if let Some(auto_create) = effective_config.env_config.auto_create {
+            println!("  PGBRANCH_AUTO_CREATE: {}", auto_create);
+        }
+        if let Some(auto_switch) = effective_config.env_config.auto_switch {
+            println!("  PGBRANCH_AUTO_SWITCH: {}", auto_switch);
+        }
+        if let Some(ref regex) = effective_config.env_config.branch_filter_regex {
+            println!("  PGBRANCH_BRANCH_FILTER_REGEX: {}", regex);
+        }
+        if let Some(ref branches) = effective_config.env_config.disabled_branches {
+            println!("  PGBRANCH_DISABLED_BRANCHES: {}", branches.join(","));
+        }
+        if let Some(current_disabled) = effective_config.env_config.current_branch_disabled {
+            println!("  PGBRANCH_CURRENT_BRANCH_DISABLED: {}", current_disabled);
+        }
+        if let Some(ref host) = effective_config.env_config.database_host {
+            println!("  PGBRANCH_DATABASE_HOST: {}", host);
+        }
+        if let Some(port) = effective_config.env_config.database_port {
+            println!("  PGBRANCH_DATABASE_PORT: {}", port);
+        }
+        if let Some(ref user) = effective_config.env_config.database_user {
+            println!("  PGBRANCH_DATABASE_USER: {}", user);
+        }
+        if effective_config.env_config.database_password.is_some() {
+            println!("  PGBRANCH_DATABASE_PASSWORD: [hidden]");
+        }
+        if let Some(ref prefix) = effective_config.env_config.database_prefix {
+            println!("  PGBRANCH_DATABASE_PREFIX: {}", prefix);
+        }
+    }
+    
+    println!();
+    
+    // Show local config overrides
+    println!("📁 Local Config File Overrides:");
+    if let Some(ref local_config) = effective_config.local_config {
+        println!("  ✅ Local config file found (.pgbranch.local.yml)");
+        if local_config.disabled.is_some() || 
+           local_config.disabled_branches.is_some() ||
+           local_config.database.is_some() ||
+           local_config.git.is_some() ||
+           local_config.behavior.is_some() ||
+           local_config.post_commands.is_some() {
+            println!("  Local overrides present (see merged config below)");
+        } else {
+            println!("  No overrides in local config");
+        }
+    } else {
+        println!("  (no local config file found)");
+    }
+    
+    println!();
+    
+    // Show final merged configuration
+    println!("⚙️  Final Merged Configuration:");
+    let merged_config = effective_config.get_merged_config();
+    println!("{}", serde_yaml::to_string(&merged_config)?);
+    
     Ok(())
 }

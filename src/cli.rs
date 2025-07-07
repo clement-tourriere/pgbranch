@@ -430,15 +430,38 @@ async fn check_database_permissions(db_manager: &DatabaseManager) -> Result<bool
 }
 
 fn check_git_hooks() -> Result<bool> {
-    let hooks_dir = std::path::Path::new(".git/hooks");
-    if !hooks_dir.exists() {
-        return Ok(false);
+    // Use GitRepository to properly check for pgbranch-specific hooks
+    match GitRepository::new(".") {
+        Ok(git_repo) => {
+            let hooks_dir = std::path::Path::new(".git/hooks");
+            if !hooks_dir.exists() {
+                return Ok(false);
+            }
+            
+            let post_checkout_hook = hooks_dir.join("post-checkout");
+            let post_merge_hook = hooks_dir.join("post-merge");
+            
+            // Check if the hooks exist AND are pgbranch hooks
+            let has_post_checkout = post_checkout_hook.exists() && 
+                git_repo.is_pgbranch_hook(&post_checkout_hook).unwrap_or(false);
+            let has_post_merge = post_merge_hook.exists() && 
+                git_repo.is_pgbranch_hook(&post_merge_hook).unwrap_or(false);
+            
+            Ok(has_post_checkout || has_post_merge)
+        }
+        Err(_) => {
+            // If we can't access git repo, fall back to simple file existence check
+            let hooks_dir = std::path::Path::new(".git/hooks");
+            if !hooks_dir.exists() {
+                return Ok(false);
+            }
+            
+            let post_checkout_hook = hooks_dir.join("post-checkout");
+            let post_merge_hook = hooks_dir.join("post-merge");
+            
+            Ok(post_checkout_hook.exists() || post_merge_hook.exists())
+        }
     }
-    
-    let post_checkout_hook = hooks_dir.join("post-checkout");
-    let post_merge_hook = hooks_dir.join("post-merge");
-    
-    Ok(post_checkout_hook.exists() || post_merge_hook.exists())
 }
 
 async fn handle_git_hook(config: &mut Config, db_manager: &DatabaseManager) -> Result<()> {

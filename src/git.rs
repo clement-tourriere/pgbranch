@@ -230,7 +230,7 @@ fi
 "#.to_string()
     }
 
-    fn is_pgbranch_hook(&self, hook_path: &Path) -> Result<bool> {
+    pub fn is_pgbranch_hook(&self, hook_path: &Path) -> Result<bool> {
         if !hook_path.exists() {
             return Ok(false);
         }

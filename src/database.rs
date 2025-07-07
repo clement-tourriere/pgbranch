@@ -28,6 +28,15 @@ impl DatabaseManager {
         Ok(client)
     }
 
+    fn get_env_var_with_fallback(&self, var_name: &str) -> Option<String> {
+        // First try .env file, then actual environment variables
+        if let Some(value) = self.get_var_from_env_file(var_name) {
+            return Some(value);
+        }
+        
+        std::env::var(var_name).ok()
+    }
+
     pub async fn create_database_branch(&self, branch_name: &str) -> Result<()> {
         let client = self.connect().await?;
         let db_name = self.config.get_database_name(branch_name);
@@ -188,6 +197,11 @@ impl DatabaseManager {
                     }
                 }
                 AuthMethod::Environment => {
+                    // First try .env file, then actual environment variables
+                    if let Some(password) = self.get_password_from_env_file() {
+                        log::debug!("Using password from .env file");
+                        return Ok(Some(password));
+                    }
                     if let Some(password) = self.get_password_from_env() {
                         log::debug!("Using password from environment");
                         return Ok(Some(password));
@@ -224,12 +238,21 @@ impl DatabaseManager {
     }
 
     async fn build_connection_string(&self) -> Result<String> {
-        let mut conn_str = format!(
-            "host={} port={} user={}",
-            self.config.database.host,
-            self.config.database.port,
-            self.config.database.user
-        );
+        // Use config values but allow .env file override for host, port, user
+        let host = self.get_env_var_with_fallback("PGHOST")
+            .or_else(|| self.get_var_from_env_file("POSTGRES_HOST"))
+            .unwrap_or_else(|| self.config.database.host.clone());
+            
+        let port = self.get_env_var_with_fallback("PGPORT")
+            .or_else(|| self.get_var_from_env_file("POSTGRES_PORT"))
+            .and_then(|p| p.parse().ok())
+            .unwrap_or(self.config.database.port);
+            
+        let user = self.get_env_var_with_fallback("PGUSER")
+            .or_else(|| self.get_var_from_env_file("POSTGRES_USER"))
+            .unwrap_or_else(|| self.config.database.user.clone());
+
+        let mut conn_str = format!("host={} port={} user={}", host, port, user);
         
         // Try authentication methods in order
         if let Some(password) = self.get_password().await? {
@@ -237,6 +260,7 @@ impl DatabaseManager {
         }
         
         conn_str.push_str(" dbname=postgres");
+        log::debug!("Connection string: {}", conn_str.replace("password=", "password=***"));
         Ok(conn_str)
     }
 
@@ -259,6 +283,66 @@ impl DatabaseManager {
         let host_var = format!("PGPASSWORD_{}", self.config.database.host.to_uppercase());
         if let Ok(password) = std::env::var(&host_var) {
             return Some(password);
+        }
+        
+        None
+    }
+
+    fn get_password_from_env_file(&self) -> Option<String> {
+        // Check for PGPASSWORD first
+        if let Some(password) = self.get_var_from_env_file("PGPASSWORD") {
+            log::debug!("Found PGPASSWORD in .env file");
+            return Some(password);
+        }
+        
+        // Also check for other common PostgreSQL password variables
+        for var_name in ["POSTGRES_PASSWORD", "POSTGRESQL_PASSWORD", "DB_PASSWORD"] {
+            if let Some(password) = self.get_var_from_env_file(var_name) {
+                log::debug!("Found {} in .env file", var_name);
+                return Some(password);
+            }
+        }
+        
+        None
+    }
+
+    fn get_var_from_env_file(&self, var_name: &str) -> Option<String> {
+        // Check common .env file locations in order
+        let env_files = vec![".env", ".env.local", ".env.development"];
+        
+        for env_file in env_files {
+            if let Some(value) = self.read_env_var_from_file(env_file, var_name) {
+                log::debug!("Found {} in {}", var_name, env_file);
+                return Some(value);
+            }
+        }
+        
+        None
+    }
+
+    fn read_env_var_from_file(&self, file_path: &str, var_name: &str) -> Option<String> {
+        if let Ok(content) = fs::read_to_string(file_path) {
+            for line in content.lines() {
+                let line = line.trim();
+                
+                // Skip empty lines and comments
+                if line.is_empty() || line.starts_with('#') {
+                    continue;
+                }
+                
+                // Parse KEY=VALUE format
+                if let Some((key, value)) = line.split_once('=') {
+                    let key = key.trim();
+                    let value = value.trim();
+                    
+                    // Remove quotes if present
+                    let value = value.trim_matches('"').trim_matches('\'');
+                    
+                    if key == var_name {
+                        return Some(value.to_string());
+                    }
+                }
+            }
         }
         
         None

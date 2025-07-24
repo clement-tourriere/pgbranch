@@ -22,6 +22,24 @@ impl<'a> PostCommandExecutor<'a> {
         })
     }
 
+    pub async fn from_backend(config: &'a Config, backend: &dyn crate::backends::DatabaseBranchingBackend, branch_name: &str) -> Result<Self> {
+        let connection_info = backend.get_connection_info(branch_name).await?;
+        let context = TemplateContext::from_connection_info(
+            &connection_info, 
+            branch_name, 
+            &config.database.template_database, 
+            &config.database.database_prefix
+        );
+        let working_dir = std::env::current_dir()
+            .context("Failed to get current working directory")?;
+        
+        Ok(Self {
+            config,
+            context,
+            working_dir,
+        })
+    }
+
     pub async fn execute_all_post_commands(&self) -> Result<()> {
         if self.config.post_commands.is_empty() {
             log::debug!("No post-commands configured");

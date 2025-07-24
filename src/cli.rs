@@ -2,6 +2,7 @@ use anyhow::Result;
 use clap::Subcommand;
 use crate::config::{Config, EffectiveConfig};
 use crate::database::DatabaseManager;
+use crate::backends::{DatabaseBranchingBackend, factory::create_backend};
 use crate::git::GitRepository;
 use crate::docker;
 use crate::post_commands::PostCommandExecutor;
@@ -111,40 +112,47 @@ pub async fn handle_command(cmd: Commands) -> Result<()> {
         None
     };
     
-    let db_manager = DatabaseManager::new(config.clone());
+    let backend = create_backend(&config).await?;
+    let db_manager = DatabaseManager::new(config.clone()); // Still needed for some diagnostic functions
     
     match cmd {
         Commands::Create { branch_name } => {
             log::info!("Creating database branch: {}", branch_name);
-            db_manager.create_database_branch(&branch_name).await?;
-            println!("✅ Created database branch: {}", branch_name);
+            let branch_info = backend.create_branch(&branch_name, None).await?;
+            println!("✅ Created database branch: {} ({})", branch_name, branch_info.database_name);
             
             // Execute post-commands
             if !config.post_commands.is_empty() {
-                let executor = PostCommandExecutor::new(&config, &branch_name)?;
+                let executor = PostCommandExecutor::from_backend(&config, backend.as_ref(), &branch_name).await?;
                 executor.execute_all_post_commands().await?;
             }
         }
         Commands::Delete { branch_name } => {
             log::info!("Deleting database branch: {}", branch_name);
-            db_manager.drop_database_branch(&branch_name).await?;
+            backend.delete_branch(&branch_name).await?;
             println!("✅ Deleted database branch: {}", branch_name);
         }
         Commands::List => {
-            match db_manager.list_database_branches().await {
+            match backend.list_branches().await {
                 Ok(mut branches) => {
-                    // Always add main branch at the beginning
-                    branches.insert(0, "main".to_string());
+                    // Always add main branch at the beginning for display
+                    let main_branch = crate::backends::BranchInfo {
+                        name: "main".to_string(),
+                        created_at: None,
+                        parent_branch: None,
+                        database_name: config.database.template_database.clone(),
+                    };
+                    branches.insert(0, main_branch);
                     
-                    println!("📋 PostgreSQL branches:");
+                    println!("📋 {} branches:", backend.backend_name());
                     for branch in branches {
                         let current_branch = get_current_branch_with_default(&local_state, &config_path, &config);
                         let is_current = match current_branch {
                             Some(current) => {
-                                if current == "_main" && branch == "main" {
+                                if current == "_main" && branch.name == "main" {
                                     true
                                 } else {
-                                    current == branch
+                                    current == branch.name
                                 }
                             }
                             None => false
@@ -152,18 +160,21 @@ pub async fn handle_command(cmd: Commands) -> Result<()> {
                         
                         let marker = if is_current { "* " } else { "  " };
                         
-                        // Special display for main - inverse format: "* postgres (main)"
-                        if branch == "main" {
-                            println!("{}{} (main)", marker, config.database.template_database);
+                        if let Some(created) = branch.created_at {
+                            println!("{}{} ({}) - created {}", marker, branch.name, branch.database_name, created.format("%Y-%m-%d %H:%M:%S"));
                         } else {
-                            println!("{}{}", marker, branch);
+                            if branch.name == "main" {
+                                println!("{}{} (main template)", marker, branch.database_name);
+                            } else {
+                                println!("{}{} ({})", marker, branch.name, branch.database_name);
+                            }
                         }
                     }
                 }
                 Err(e) => {
                     // Even when database connection fails, show main and current branch from local state
                     println!("⚠️  Could not list database branches: {}", e);
-                    println!("📋 PostgreSQL branches:");
+                    println!("📋 {} branches:", backend.backend_name());
                     
                     let current_branch = get_current_branch_with_default(&local_state, &config_path, &config);
                     
@@ -173,12 +184,12 @@ pub async fn handle_command(cmd: Commands) -> Result<()> {
                     } else {
                         "  "
                     };
-                    println!("{}{} (main)", main_marker, config.database.template_database);
+                    println!("{}{} (main template)", main_marker, config.database.template_database);
                     
                     // Show current branch from local state if it's not main
                     if let Some(current) = current_branch {
                         if current != "_main" {
-                            println!("* {}", current);
+                            println!("* {} (?)", current);
                         }
                     }
                 }
@@ -256,8 +267,15 @@ pub async fn handle_command(cmd: Commands) -> Result<()> {
         Commands::Cleanup { max_count } => {
             let max = max_count.unwrap_or(config.behavior.max_branches.unwrap_or(10));
             log::info!("Cleaning up old branches, keeping {} most recent", max);
-            db_manager.cleanup_old_branches(max).await?;
-            println!("✅ Cleaned up old database branches");
+            let deleted = backend.cleanup_old_branches(max).await?;
+            if deleted.is_empty() {
+                println!("✅ No old database branches to clean up");
+            } else {
+                println!("✅ Cleaned up {} old database branches:", deleted.len());
+                for branch in &deleted {
+                    println!("  - {}", branch);
+                }
+            }
         }
         Commands::Config => {
             println!("Current configuration:");
@@ -285,7 +303,7 @@ pub async fn handle_command(cmd: Commands) -> Result<()> {
                 log::debug!("Git hooks are disabled via configuration");
                 return Ok(());
             }
-            handle_git_hook(&mut config, &db_manager, &mut local_state, &config_path).await?;
+            handle_git_hook(&mut config, backend.as_ref(), &mut local_state, &config_path).await?;
         }
         Commands::Templates { branch_name } => {
             let example_branch = branch_name.unwrap_or_else(|| "feature/example-branch".to_string());
@@ -303,9 +321,9 @@ pub async fn handle_command(cmd: Commands) -> Result<()> {
             if template {
                 handle_switch_to_main(&mut config, &db_manager, &mut local_state, &config_path).await?;
             } else if let Some(branch) = branch_name {
-                handle_switch_command(&mut config, &db_manager, &branch, &mut local_state, &config_path).await?;
+                handle_switch_command(&mut config, backend.as_ref(), &branch, &mut local_state, &config_path).await?;
             } else {
-                handle_interactive_switch(&mut config, &db_manager, &mut local_state, &config_path).await?;
+                handle_interactive_switch(&mut config, backend.as_ref(), &mut local_state, &config_path).await?;
             }
         }
         Commands::TestSwitch { branch_name } => {
@@ -456,8 +474,11 @@ fn validate_config(config: &Config) -> Result<()> {
 }
 
 async fn check_template_database(db_manager: &DatabaseManager, template_name: &str) -> Result<bool> {
+    // For template databases, we need to check the actual database name, not treat it as a branch
     let client = db_manager.connect().await?;
-    db_manager.database_exists(&client, template_name).await
+    let query = "SELECT 1 FROM pg_database WHERE datname = $1";
+    let rows = client.query(query, &[&template_name]).await?;
+    Ok(!rows.is_empty())
 }
 
 async fn check_database_permissions(db_manager: &DatabaseManager) -> Result<bool> {
@@ -509,7 +530,7 @@ fn check_git_hooks() -> Result<bool> {
     }
 }
 
-async fn handle_git_hook(config: &mut Config, db_manager: &DatabaseManager, local_state: &mut Option<LocalStateManager>, config_path: &Option<std::path::PathBuf>) -> Result<()> {
+async fn handle_git_hook(config: &mut Config, backend: &dyn DatabaseBranchingBackend, local_state: &mut Option<LocalStateManager>, config_path: &Option<std::path::PathBuf>) -> Result<()> {
     let git_repo = GitRepository::new(".")?;
     
     if let Some(current_git_branch) = git_repo.get_current_branch()? {
@@ -519,11 +540,11 @@ async fn handle_git_hook(config: &mut Config, db_manager: &DatabaseManager, loca
         if config.should_switch_on_branch(&current_git_branch) {
             // If switching to main git branch, use main database
             if current_git_branch == config.git.main_branch {
-                handle_switch_to_main(config, db_manager, local_state, config_path).await?;
+                handle_switch_to_main(config, &DatabaseManager::new(config.clone()), local_state, config_path).await?;
             } else {
                 // For other branches, check if we should create them and switch
                 if config.should_create_branch(&current_git_branch) {
-                    handle_switch_command(config, db_manager, &current_git_branch, local_state, config_path).await?;
+                    handle_switch_command(config, backend, &current_git_branch, local_state, config_path).await?;
                 } else {
                     log::info!("Git branch {} configured not to create PostgreSQL branch", current_git_branch);
                 }
@@ -536,10 +557,10 @@ async fn handle_git_hook(config: &mut Config, db_manager: &DatabaseManager, loca
     Ok(())
 }
 
-async fn handle_interactive_switch(config: &mut Config, db_manager: &DatabaseManager, local_state: &mut Option<LocalStateManager>, config_path: &Option<std::path::PathBuf>) -> Result<()> {
+async fn handle_interactive_switch(config: &mut Config, backend: &dyn DatabaseBranchingBackend, local_state: &mut Option<LocalStateManager>, config_path: &Option<std::path::PathBuf>) -> Result<()> {
     // Get available branches
-    let mut branches = match db_manager.list_database_branches().await {
-        Ok(branches) => branches,
+    let mut branches = match backend.list_branches().await {
+        Ok(branches) => branches.into_iter().map(|b| b.name).collect(),
         Err(_) => {
             // If database connection fails, show current branch from local state or smart default (if not main)
             let mut fallback_branches = Vec::new();
@@ -587,9 +608,9 @@ async fn handle_interactive_switch(config: &mut Config, db_manager: &DatabaseMan
     match run_interactive_selector(branch_items) {
         Ok(selected_branch) => {
             if selected_branch == "main" {
-                handle_switch_to_main(config, db_manager, local_state, config_path).await?;
+                handle_switch_to_main(config, &DatabaseManager::new(config.clone()), local_state, config_path).await?;
             } else {
-                handle_switch_command(config, db_manager, &selected_branch, local_state, config_path).await?;
+                handle_switch_command(config, backend, &selected_branch, local_state, config_path).await?;
             }
         }
         Err(e) => {
@@ -654,7 +675,7 @@ fn run_interactive_selector(items: Vec<BranchItem>) -> Result<String, inquire::I
     Ok(items[selected_index].name.clone())
 }
 
-async fn handle_switch_command(config: &mut Config, db_manager: &DatabaseManager, branch_name: &str, local_state: &mut Option<LocalStateManager>, config_path: &Option<std::path::PathBuf>) -> Result<()> {
+async fn handle_switch_command(config: &mut Config, backend: &dyn DatabaseBranchingBackend, branch_name: &str, local_state: &mut Option<LocalStateManager>, config_path: &Option<std::path::PathBuf>) -> Result<()> {
     // Normalize the branch name (feature/auth → feature_auth)
     let normalized_branch = config.get_normalized_branch_name(branch_name);
     
@@ -664,11 +685,12 @@ async fn handle_switch_command(config: &mut Config, db_manager: &DatabaseManager
     set_current_branch(local_state, config_path, Some(normalized_branch.clone()))?;
     
     // Try database operations (non-fatal if they fail)
-    match db_manager.list_database_branches().await {
+    match backend.list_branches().await {
         Ok(db_branches) => {
-            if !db_branches.contains(&normalized_branch) {
+            let branch_exists = db_branches.iter().any(|b| b.name == normalized_branch);
+            if !branch_exists {
                 println!("📦 Creating database branch: {}", normalized_branch);
-                match db_manager.create_database_branch(&normalized_branch).await {
+                match backend.create_branch(&normalized_branch, None).await {
                     Ok(_) => println!("✅ Created database branch: {}", normalized_branch),
                     Err(e) => {
                         println!("⚠️  Failed to create database branch: {}", e);
@@ -688,7 +710,7 @@ async fn handle_switch_command(config: &mut Config, db_manager: &DatabaseManager
     // Execute post-commands
     if !config.post_commands.is_empty() {
         println!("🔧 Executing post-commands for branch switch...");
-        let executor = PostCommandExecutor::new(config, &normalized_branch)?;
+        let executor = PostCommandExecutor::from_backend(config, backend, &normalized_branch).await?;
         executor.execute_all_post_commands().await?;
     }
     
@@ -727,7 +749,7 @@ async fn handle_test_switch_command(config: &mut Config, branch_name: &str) -> R
     
     println!("✅ Updated current branch to: {}", normalized_branch);
     
-    // Execute post-commands
+    // Execute post-commands (using simulated template context since this is a test)
     if !config.post_commands.is_empty() {
         println!("🔧 Executing post-commands for branch switch...");
         let executor = PostCommandExecutor::new(config, &normalized_branch)?;

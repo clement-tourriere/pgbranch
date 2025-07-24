@@ -37,22 +37,28 @@ impl DatabaseManager {
         std::env::var(var_name).ok()
     }
 
-    pub async fn create_database_branch(&self, branch_name: &str) -> Result<()> {
+    pub fn get_branch_database_name(&self, branch_name: &str) -> String {
+        self.config.get_database_name(branch_name)
+    }
+
+    pub async fn create_database_branch(&self, branch_name: &str, template_db: Option<&str>) -> Result<()> {
         let client = self.connect().await?;
         let db_name = self.config.get_database_name(branch_name);
         
-        if self.database_exists(&client, &db_name).await? {
+        if self.database_exists_internal(&client, &db_name).await? {
             log::info!("Database {} already exists, skipping creation", db_name);
             return Ok(());
         }
         
+        let template = template_db.unwrap_or(&self.config.database.template_database);
+        
         // Terminate existing connections to the template database before creating
-        self.terminate_connections_to_database(&client, &self.config.database.template_database).await?;
+        self.terminate_connections_to_database(&client, template).await?;
         
         let query = format!(
             "CREATE DATABASE {} WITH TEMPLATE {}",
             escape_identifier(&db_name),
-            escape_identifier(&self.config.database.template_database)
+            escape_identifier(template)
         );
         
         client.execute(&query, &[]).await
@@ -62,11 +68,11 @@ impl DatabaseManager {
         Ok(())
     }
 
-    pub async fn drop_database_branch(&self, branch_name: &str) -> Result<()> {
+    pub async fn delete_database_branch(&self, branch_name: &str) -> Result<()> {
         let client = self.connect().await?;
         let db_name = self.config.get_database_name(branch_name);
         
-        if !self.database_exists(&client, &db_name).await? {
+        if !self.database_exists_internal(&client, &db_name).await? {
             log::info!("Database {} does not exist, skipping deletion", db_name);
             return Ok(());
         }
@@ -104,7 +110,18 @@ impl DatabaseManager {
         Ok(branches)
     }
 
-    pub async fn database_exists(&self, client: &Client, db_name: &str) -> Result<bool> {
+    pub async fn test_connection(&self) -> Result<()> {
+        let _ = self.connect().await?;
+        Ok(())
+    }
+
+    pub async fn database_exists(&self, branch_name: &str) -> Result<bool> {
+        let client = self.connect().await?;
+        let db_name = self.config.get_database_name(branch_name);
+        self.database_exists_internal(&client, &db_name).await
+    }
+
+    async fn database_exists_internal(&self, client: &Client, db_name: &str) -> Result<bool> {
         let query = "SELECT 1 FROM pg_database WHERE datname = $1";
         let rows = client.query(query, &[&db_name]).await
             .context("Failed to check if database exists")?;
@@ -161,7 +178,7 @@ impl DatabaseManager {
         Ok(())
     }
 
-    pub async fn cleanup_old_branches(&self, max_count: usize) -> Result<()> {
+    pub async fn cleanup_old_branches(&self, max_count: usize) -> Result<Vec<String>> {
         let client = self.connect().await?;
         let prefix = &self.config.database.database_prefix;
         
@@ -177,17 +194,21 @@ impl DatabaseManager {
         let rows = client.query(query, &[&pattern, &(max_count as i64)]).await
             .context("Failed to query old branches for cleanup")?;
         
+        let mut deleted_branches = Vec::new();
         for row in rows {
             let db_name: String = row.get(0);
             if let Some(branch_name) = self.extract_branch_name(&db_name) {
-                self.drop_database_branch(&branch_name).await?;
+                match self.delete_database_branch(&branch_name).await {
+                    Ok(_) => deleted_branches.push(branch_name),
+                    Err(e) => log::warn!("Failed to delete branch {}: {}", branch_name, e),
+                }
             }
         }
         
-        Ok(())
+        Ok(deleted_branches)
     }
 
-    async fn get_password(&self) -> Result<Option<String>> {
+    pub async fn get_password(&self) -> Result<Option<String>> {
         for method in &self.config.database.auth.methods {
             match method {
                 AuthMethod::Password => {

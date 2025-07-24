@@ -1,15 +1,23 @@
-# pgbranch - Postgres Database Branching Tool
+# pgbranch - Multi-Backend Database Branching Tool
 
 ## Overview
-pgbranch is a Rust-based tool that provides simple branching support for PostgreSQL databases during development. It enables developers to create and manage database branches that automatically synchronize with Git branches, making it easy to test migrations, features, and changes in isolation.
+pgbranch is a Rust-based tool that provides database branching support during development. It enables developers to create and manage database branches that automatically synchronize with Git branches, making it easy to test migrations, features, and changes in isolation. Originally built for PostgreSQL, pgbranch now supports multiple backend providers.
 
 ## Core Concept
-The tool leverages PostgreSQL's TEMPLATE database feature to efficiently create database copies without the overhead of traditional `pg_dump`/`pg_restore` operations. When you create a new Git branch, pgbranch can automatically create a corresponding PostgreSQL database branch for isolated development.
+The tool provides a unified interface for database branching across multiple providers:
+- **Local PostgreSQL**: Uses TEMPLATE database feature for efficient copying
+- **Neon**: Cloud-native PostgreSQL with instant branching
+- **Database Lab Engine**: Thin cloning for large databases
+- **Xata**: Serverless PostgreSQL with built-in branching
+
+When you create a new Git branch, pgbranch can automatically create a corresponding database branch for isolated development using your chosen backend.
 
 ## Key Features
-- **Automatic Git Integration**: Creates PostgreSQL database branches when Git branches are created (via Git hooks)
-- **Template-based Copying**: Uses PostgreSQL's TEMPLATE feature for fast database duplication
-- **Configuration-driven**: Managed through a `.pgbranch` configuration file in your Git repository
+- **Multi-Backend Support**: Choose from local PostgreSQL, Neon, Database Lab, or Xata
+- **Automatic Git Integration**: Creates database branches when Git branches are created (via Git hooks)
+- **Backend-Specific Optimizations**: Each backend uses its native branching capabilities
+- **Unified Configuration**: Same `.pgbranch.yml` format works across all backends
+- **Post-Commands**: Run migrations, update configs, restart services after branch operations
 - **Rust Implementation**: Single binary with cross-platform support
 
 ## Use Cases
@@ -93,11 +101,37 @@ cargo check
 ```
 
 ## Project Structure
-- Configuration parsing and validation
-- PostgreSQL connection and template management
-- Git hook integration
-- Database branch creation and management
-- CLI interface for manual operations
+- **Backend Abstraction Layer** (`src/backends/`):
+  - `mod.rs`: Core trait definitions (`DatabaseBranchingBackend`)
+  - `postgres_local.rs`: Local PostgreSQL implementation
+  - `neon.rs`: Neon API implementation
+  - `dblab.rs`: Database Lab Engine implementation
+  - `xata.rs`: Xata API implementation
+  - `factory.rs`: Backend instantiation logic
+- **Core Components**:
+  - `config.rs`: Multi-backend configuration parsing and validation
+  - `cli.rs`: Backend-agnostic CLI commands
+  - `post_commands.rs`: Post-command execution with backend connection info
+  - `git.rs`: Git hook integration
+  - `database.rs`: Legacy PostgreSQL-specific utilities
+
+## Architecture
+
+The tool uses a trait-based architecture for backend abstraction:
+
+```rust
+#[async_trait]
+pub trait DatabaseBranchingBackend: Send + Sync {
+    async fn create_branch(&self, branch_name: &str, from_branch: Option<&str>) -> Result<BranchInfo>;
+    async fn delete_branch(&self, branch_name: &str) -> Result<()>;
+    async fn list_branches(&self) -> Result<Vec<BranchInfo>>;
+    async fn branch_exists(&self, branch_name: &str) -> Result<bool>;
+    async fn get_connection_info(&self, branch_name: &str) -> Result<ConnectionInfo>;
+    // ... more methods
+}
+```
+
+This allows all backends to provide consistent functionality while leveraging their specific capabilities.
 
 ## References
 - PostgreSQL TEMPLATE documentation for implementation details

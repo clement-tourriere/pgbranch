@@ -7,6 +7,14 @@ authors = ["Clément Tourrière <clement.tourriere@gmail.com>"]
 license = "MIT"
 repository = "https://github.com/clement-tourriere/pgbranch"
 
+[lib]
+name = "pgbranch"
+path = "src/lib.rs"
+
+[[bin]]
+name = "pgbranch"
+path = "src/main.rs"
+
 [dependencies]
 # CLI and argument parsing - minimal features for size
 clap = { version = "4.5", default-features = false, features = ["derive", "std", "help", "usage", "error-context"] }
@@ -14,9 +22,11 @@ clap = { version = "4.5", default-features = false, features = ["derive", "std",
 # Serialization - YAML only
 serde = { version = "1.0", default-features = false, features = ["derive", "std"] }
 serde_yaml = { version = "0.9", default-features = false }
+serde_json = { version = "1.0", default-features = false, features = ["std"] }
 
 # Async runtime - minimal features for size
 tokio = { version = "1.46", default-features = false, features = ["rt", "net", "time", "macros"] }
+async-trait = "0.1"
 
 # Database
 tokio-postgres = { version = "0.7", default-features = false, features = ["runtime"] }
@@ -45,6 +55,9 @@ inquire = { version = "0.7", default-features = false, features = ["crossterm"] 
 
 # Date/time handling for local state timestamps
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+
+# HTTP client for API backends
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 [dev-dependencies]
 tempfile = "3.20"

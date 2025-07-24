@@ -7,11 +7,63 @@ use std::env;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub database: DatabaseConfig,
+    #[serde(default)]
+    pub backend: Option<BackendConfig>,
     pub git: GitConfig,
     pub behavior: BehaviorConfig,
     pub post_commands: Vec<PostCommand>,
     #[serde(skip)]
     pub current_branch: Option<String>, // Deprecated - kept for backward compatibility, not serialized
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackendConfig {
+    #[serde(rename = "type")]
+    pub backend_type: String,
+    #[serde(default)]
+    pub postgres_local: Option<PostgresLocalConfig>,
+    #[serde(default)]
+    pub neon: Option<NeonConfig>,
+    #[serde(default)]
+    pub dblab: Option<DBLabConfig>,
+    #[serde(default)]
+    pub xata: Option<XataConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PostgresLocalConfig {
+    pub host: String,
+    pub port: u16,
+    pub user: String,
+    pub password: Option<String>,
+    pub template_database: String,
+    pub database_prefix: String,
+    pub auth: AuthConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NeonConfig {
+    pub api_key: String,
+    pub project_id: String,
+    #[serde(default = "default_neon_base_url")]
+    pub base_url: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DBLabConfig {
+    pub api_url: String,
+    pub auth_token: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct XataConfig {
+    pub organization_id: String,
+    pub project_id: String,
+    pub api_key: String,
+}
+
+fn default_neon_base_url() -> String {
+    "https://console.neon.tech/api/v2".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -228,6 +280,7 @@ impl Default for Config {
                 max_branches: Some(10),
                 naming_strategy: NamingStrategy::Prefix,
             },
+            backend: None,
             post_commands: vec![],
             current_branch: None, // Deprecated field, always None for new configs
         }
@@ -769,6 +822,19 @@ impl TemplateContext {
             db_password: config.database.password.clone(),
             template_db: config.database.template_database.clone(),
             prefix: config.database.database_prefix.clone(),
+        }
+    }
+
+    pub fn from_connection_info(connection_info: &crate::backends::ConnectionInfo, branch_name: &str, template_db: &str, prefix: &str) -> Self {
+        Self {
+            branch_name: branch_name.to_string(),
+            db_name: connection_info.database.clone(),
+            db_host: connection_info.host.clone(),
+            db_port: connection_info.port,
+            db_user: connection_info.user.clone(),
+            db_password: connection_info.password.clone(),
+            template_db: template_db.to_string(),
+            prefix: prefix.to_string(),
         }
     }
 }

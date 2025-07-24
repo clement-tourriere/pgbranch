@@ -1,0 +1,31 @@
+# Example configuration for Xata backend
+backend:
+  type: xata
+  xata:
+    organization_id: ${XATA_ORG_ID}      # Your Xata organization ID
+    project_id: ${XATA_PROJECT_ID}       # Your Xata project ID
+    api_key: ${XATA_API_KEY}             # Your Xata API key
+
+# Git configuration
+git:
+  auto_create_on_branch: true
+  branch_filter_regex: null
+  exclude_branches:
+    - main
+    - master
+
+# Behavior configuration
+behavior:
+  auto_cleanup: false
+  max_branches: 10
+  naming_strategy: prefix
+
+# Post-commands work identically across all backends
+# Template variables will be populated with the appropriate connection info
+post_commands:
+  - echo 'DATABASE_URL={connection_string}' >> .env  # Xata provides full connection string
+  - name: Run database migrations
+    command: echo 'Would run: npm run migrate'
+    condition: never
+    continue_on_error: true
+  - echo 'Xata database {db_name} ready for branch {branch_name}!'

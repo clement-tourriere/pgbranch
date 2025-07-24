@@ -1,17 +1,18 @@
 # pgbranch
 
-A Rust tool for creating PostgreSQL database branches that automatically sync with Git branches.
+A powerful multi-backend database branching tool that automatically syncs database branches with Git branches. Originally designed for PostgreSQL, pgbranch now supports multiple database branching providers including local PostgreSQL, Neon, Database Lab Engine, and Xata.
 
-## Features
+## 🚀 Features
 
-- **Automatic Database Branching**: Creates PostgreSQL database branches when you create Git branches
-- **Fast Database Copying**: Uses PostgreSQL's TEMPLATE feature for efficient database duplication
-- **Configurable**: Fully configurable via `.pgbranch` configuration file
+- **Multi-Backend Support**: Choose from local PostgreSQL, Neon, Database Lab Engine, or Xata
+- **Automatic Database Branching**: Creates database branches when you create Git branches
+- **Fast Database Operations**: Uses provider-specific optimizations for efficient branching
+- **Unified Configuration**: Same `.pgbranch.yml` format works across all backends
 - **Git Integration**: Automatic setup via Git hooks
-- **Regex Filtering**: Create database branches only for specific branch patterns
-- **CLI Interface**: Manual database branch management
+- **Post-Commands**: Run commands after branch creation/switching (migrations, config updates, etc.)
+- **Interactive CLI**: Browse and switch branches with arrow keys and fuzzy filtering
 
-## Installation
+## 📦 Installation
 
 ### From Source
 
@@ -28,48 +29,119 @@ cargo build --release
 # Copy target/release/pgbranch to your PATH
 ```
 
-## Quick Start
+## 🚀 Quick Start
 
-1. Initialize configuration in your Git repository:
-   ```bash
-   pgbranch init
-   ```
+### 1. Initialize Configuration
 
-2. Edit `.pgbranch.yml` file to configure your PostgreSQL connection:
-   ```yaml
-   database:
-     host: localhost
-     port: 5432
-     user: postgres
-     password: null
-     template_database: myapp_dev
-     database_prefix: myapp
-   
-   git:
-     auto_create_on_branch: true
-     auto_switch_on_branch: true
-     main_branch: main
-     auto_create_branch_filter: "^(feature|bugfix)/.*"
-     exclude_branches:
-       - main
-       - master
-   
-   behavior:
-     auto_cleanup: false
-     max_branches: 10
-     naming_strategy: prefix
-   ```
+```bash
+pgbranch init
+```
 
-3. Install Git hooks for automatic database branch creation:
-   ```bash
-   pgbranch install-hooks
-   ```
+### 2. Choose Your Backend
 
-4. Now when you create a new Git branch, a corresponding database will be created automatically!
+pgbranch supports multiple database branching backends. Choose the one that fits your needs:
 
-## CLI Usage
+#### Local PostgreSQL (Default)
 
-### Manual Database Branch Management
+Traditional local PostgreSQL using TEMPLATE databases:
+
+```yaml
+# .pgbranch.yml
+database:
+  host: localhost
+  port: 5432
+  user: postgres
+  password: null
+  template_database: myapp_dev
+  database_prefix: myapp
+
+git:
+  auto_create_on_branch: true
+  exclude_branches: [main, master]
+
+post_commands:
+  - echo 'DATABASE_URL=postgresql://{db_user}@{db_host}:{db_port}/{db_name}' >> .env
+```
+
+#### Neon (Serverless PostgreSQL)
+
+Cloud-native PostgreSQL with instant branching:
+
+```yaml
+# .pgbranch.yml
+backend:
+  type: neon
+  neon:
+    api_key: ${NEON_API_KEY}
+    project_id: ${NEON_PROJECT_ID}
+
+git:
+  auto_create_on_branch: true
+  exclude_branches: [main, master]
+
+post_commands:
+  - echo 'DATABASE_URL=postgresql://{db_user}@{db_host}:{db_port}/{db_name}' >> .env
+```
+
+#### Database Lab Engine
+
+Thin cloning for large databases:
+
+```yaml
+# .pgbranch.yml
+backend:
+  type: dblab
+  dblab:
+    api_url: ${DBLAB_API_URL}
+    auth_token: ${DBLAB_AUTH_TOKEN}
+
+git:
+  auto_create_on_branch: true
+  exclude_branches: [main, master]
+
+post_commands:
+  - echo 'DATABASE_URL=postgresql://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}' >> .env
+```
+
+#### Xata
+
+Serverless PostgreSQL with built-in branching:
+
+```yaml
+# .pgbranch.yml
+backend:
+  type: xata
+  xata:
+    organization_id: ${XATA_ORG_ID}
+    project_id: ${XATA_PROJECT_ID}
+    api_key: ${XATA_API_KEY}
+
+git:
+  auto_create_on_branch: true
+  exclude_branches: [main, master]
+
+post_commands:
+  - echo 'DATABASE_URL={connection_string}' >> .env
+```
+
+### 3. Install Git Hooks
+
+```bash
+pgbranch install-hooks
+```
+
+### 4. Start Branching!
+
+Now when you create a Git branch, a corresponding database branch is created automatically:
+
+```bash
+git checkout -b feature/new-feature
+# Database branch created and switched automatically!
+```
+
+## 🔧 CLI Usage
+
+### Core Commands
 
 ```bash
 # Create a database branch
@@ -84,355 +156,218 @@ pgbranch switch feature-auth
 # Interactive switch with arrow keys and fuzzy filtering
 pgbranch switch
 
-# Switch to main/template database
-pgbranch switch --template
-
 # Delete a database branch
 pgbranch delete feature-auth
 
-# Clean up old branches (keeps most recent N)
+# Clean up old branches
 pgbranch cleanup --max-count 5
+```
 
+### Configuration & Testing
+
+```bash
 # Show current configuration
 pgbranch config
-```
 
-### Git Hook Management
-
-```bash
-# Install Git hooks
-pgbranch install-hooks
-
-# Uninstall Git hooks
-pgbranch uninstall-hooks
-```
-
-### Configuration and Testing
-
-```bash
-# Initialize configuration (with Docker Compose detection)
-pgbranch init
-
-# Check configuration and database connectivity
+# Check configuration and connectivity
 pgbranch check
 
-# Test post-commands without database connection
+# Test post-commands without database operations
 pgbranch test-post-commands feature-branch
 
 # Show available template variables
 pgbranch templates feature-branch
-
-# Test switch functionality without database operations
-pgbranch test-switch feature-branch
 ```
 
-## Configuration
+## 📋 Configuration
 
-The `.pgbranch.yml` file supports the following configuration options (YAML format only):
+### Backend Configuration
 
-### Database Configuration
+Each backend has its own configuration requirements:
 
-- `host`: PostgreSQL server host (default: "localhost")
-- `port`: PostgreSQL server port (default: 5432)
-- `user`: PostgreSQL username (default: "postgres")
-- `password`: PostgreSQL password (optional)
-- `template_database`: Database to use as template (default: "template0")
-- `database_prefix`: Prefix for created database branches (default: "pgbranch")
-
-### Git Configuration
-
-- `auto_create_on_branch`: Enable automatic database branch creation (default: true)
-- `auto_switch_on_branch`: Enable automatic database branch switching via Git hooks (default: true)
-- `main_branch`: Name of the main Git branch (default: "main", auto-detected during init)
-- `auto_create_branch_filter`: Only create database branches for Git branches matching this regex (optional)
-- `branch_filter_regex`: Legacy alias for auto_create_branch_filter (optional)
-- `exclude_branches`: List of Git branches to exclude from database branch creation
-
-### Behavior Configuration
-
-- `auto_cleanup`: Automatically clean up old database branches (default: false)
-- `max_branches`: Maximum number of database branches to keep (default: 10)
-- `naming_strategy`: How to name database branches ("prefix", "suffix", "replace")
-
-### Post-Commands Configuration
-
-Post-commands allow you to automatically execute actions after database branch creation, such as updating application configuration, running migrations, or restarting services. This is particularly useful for frameworks like Django where you need to switch the application to use the new database.
-
-- `post_commands`: Array of commands to execute after database branch creation
-
-#### Post-Command Types
-
-**1. Simple Commands (String)**
-```yaml
-post_commands:
-  - "echo 'Database ready for {branch_name}!'"
-  - "npm run migrate"
-```
-
-**2. Complex Commands (Object)**
-```yaml
-post_commands:
-  - name: "Run Django migrations"
-    command: "python manage.py migrate"
-    working_dir: "./backend"
-    condition: "file_exists:manage.py"
-    continue_on_error: false
-    environment:
-      DATABASE_URL: "postgresql://{db_user}@{db_host}:{db_port}/{db_name}"
-```
-
-**3. Replace Actions (Built-in)**
-```yaml
-post_commands:
-  - action: "replace"
-    name: "Update database configuration"
-    file: ".env.local"
-    pattern: "DATABASE_URL=.*"
-    replacement: "DATABASE_URL=postgresql://{db_user}@{db_host}:{db_port}/{db_name}"
-    create_if_missing: true
-    condition: "file_exists:manage.py"
-    continue_on_error: false
-```
-
-#### Template Variables
-
-All post-commands support template variable substitution:
-
-- `{branch_name}`: Current Git branch name
-- `{db_name}`: Generated database name (with prefix/suffix)
-- `{db_host}`: Database host
-- `{db_port}`: Database port
-- `{db_user}`: Database username
-- `{db_password}`: Database password (if configured)
-- `{template_db}`: Template database name
-- `{prefix}`: Database prefix
-
-#### Command Options
-
-- `name`: Optional descriptive name for the command
-- `working_dir`: Directory to run the command in
-- `condition`: Conditional execution (supports `file_exists:filename`, `always`, `never`)
-- `continue_on_error`: Continue execution if this command fails (default: false)
-- `environment`: Environment variables to set for the command
-
-#### Replace Action Options
-
-- `action`: Must be "replace"
-- `file`: Path to the file to modify
-- `pattern`: Regular expression pattern to match
-- `replacement`: Text to replace matches with (supports template variables)
-- `create_if_missing`: Create the file if it doesn't exist (default: false)
-
-## Examples
-
-### Basic Setup for Development
-
-```yaml
-database:
-  host: localhost
-  port: 5432
-  user: dev_user
-  template_database: myapp_dev
-  database_prefix: myapp
-
-git:
-  auto_create_on_branch: true
-  auto_switch_on_branch: true
-  main_branch: main
-  exclude_branches:
-    - main
-    - develop
-```
-
-### Django Integration with Post-Commands
-
+**Local PostgreSQL** (default, backward compatible):
 ```yaml
 database:
   host: localhost
   port: 5432
   user: postgres
+  password: null
   template_database: myapp_dev
   database_prefix: myapp
-
-git:
-  auto_create_on_branch: true
-  auto_switch_on_branch: true
-  main_branch: main
-  exclude_branches:
-    - main
-    - master
-    - develop
-
-post_commands:
-  - action: "replace"
-    name: "Update Django database configuration"
-    file: ".env.local"
-    pattern: "DATABASE_URL=.*"
-    replacement: "DATABASE_URL=postgresql://{db_user}@{db_host}:{db_port}/{db_name}"
-    create_if_missing: true
-    condition: "file_exists:manage.py"
-
-  - name: "Run Django migrations"
-    command: "python manage.py migrate"
-    condition: "file_exists:manage.py"
-    continue_on_error: false
-    environment:
-      DATABASE_URL: "postgresql://{db_user}@{db_host}:{db_port}/{db_name}"
-
-  - name: "Restart Docker services"
-    command: "docker compose restart"
-    continue_on_error: true
 ```
 
-### Node.js/Express Setup
+**Multi-Backend** (new format):
+```yaml
+backend:
+  type: neon  # or 'postgres_local', 'dblab', 'xata'
+  neon:
+    api_key: ${NEON_API_KEY}
+    project_id: ${NEON_PROJECT_ID}
+  # ... backend-specific config
+```
+
+### Post-Commands
+
+Post-commands run after branch creation/switching and work identically across all backends:
 
 ```yaml
-database:
-  host: localhost
-  port: 5432
-  user: postgres
-  template_database: myapp_dev
-  database_prefix: myapp
-
-git:
-  auto_create_on_branch: true
-  auto_switch_on_branch: true
-  main_branch: main
-  exclude_branches:
-    - main
-    - master
-    - develop
-
 post_commands:
-  - action: "replace"
-    name: "Update environment configuration"
-    file: ".env"
-    pattern: "DB_NAME=.*"
-    replacement: "DB_NAME={db_name}"
-    create_if_missing: true
-    condition: "file_exists:package.json"
-
-  - name: "Run database migrations"
+  # Simple command
+  - echo 'Switched to {branch_name}!'
+  
+  # Complex command with options
+  - name: "Run migrations"
     command: "npm run migrate"
+    working_dir: "./backend"
     condition: "file_exists:package.json"
     continue_on_error: false
+    environment:
+      DATABASE_URL: "postgresql://{db_user}@{db_host}:{db_port}/{db_name}"
+  
+  # Replace action for updating files
+  - action: "replace"
+    file: ".env.local"
+    pattern: "DATABASE_URL=.*"
+    replacement: "DATABASE_URL=postgresql://{db_user}@{db_host}:{db_port}/{db_name}"
+    create_if_missing: true
 ```
 
-### Feature Branch Only
+### Template Variables
 
-```yaml
-git:
-  auto_create_on_branch: true
-  auto_switch_on_branch: true
-  main_branch: main
-  auto_create_branch_filter: "^feature/.*"
-  exclude_branches:
-    - main
-    - master
-    - develop
-```
+Available in all post-commands:
+- `{branch_name}` - Git branch name
+- `{db_name}` - Database name
+- `{db_host}` - Database host
+- `{db_port}` - Database port
+- `{db_user}` - Database username
+- `{db_password}` - Database password (if available)
+- `{connection_string}` - Full connection string (some backends)
 
-### Manual Mode (No Auto-Creation or Auto-Switching)
+## 🌟 Backend Comparison
 
-```yaml
-git:
-  auto_create_on_branch: false
-  auto_switch_on_branch: false
-  main_branch: main
-```
+| Feature | Local PostgreSQL | Neon | Database Lab | Xata |
+|---------|-----------------|------|--------------|------|
+| **Setup Complexity** | Low | Medium | Medium | Medium |
+| **Cloud Native** | ❌ | ✅ | Optional | ✅ |
+| **Branch Speed** | Fast | Instant | Instant | Fast |
+| **Large Databases** | Slow | Fast | Very Fast | Fast |
+| **Cost** | Self-hosted | Usage-based | Self-hosted/Cloud | Usage-based |
+| **Point-in-time** | ❌ | ✅ | Via snapshots | ❌ |
+| **Best For** | Development | Cloud apps | Large databases | Serverless |
 
-## Workflow
+## 🔄 Workflow Examples
 
-### Typical Development Flow
-
-1. **Start a new feature**:
-   ```bash
-   git checkout -b feature/user-authentication
-   ```
-
-2. **Database branch is created automatically** (via Git hooks):
-   - Creates `myapp_feature_user_authentication` database
-   - Runs post-commands to update your app configuration
-   - Restarts services if configured
-
-3. **Develop your feature**:
-   - Your application now uses the isolated database branch
-   - Make schema changes, test migrations, etc.
-   - Everything is isolated from `main` branch database
-
-4. **Switch back to main**:
-   ```bash
-   git checkout main
-   ```
-   - Automatically switches to main database via Git hooks
-   - Post-commands update configuration back to main database
-   - Your application switches back to main database state
-
-5. **Review someone else's PR**:
-   ```bash
-   git fetch origin
-   git checkout feature/other-feature
-   ```
-   - Automatically creates database branch for the PR (if auto_create enabled)
-   - Automatically switches to that database branch (if auto_switch enabled)
-   - Updates your local environment to use that database
-
-6. **Manual database branch switching**:
-   ```bash
-   # Interactive selection with arrow keys and fuzzy filtering
-   pgbranch switch
-   
-   # Direct switch to specific branch
-   pgbranch switch feature-authentication
-   
-   # Switch to main/template database
-   pgbranch switch --template
-   ```
-
-### Testing Post-Commands
-
-Before committing your configuration:
+### Feature Development
 
 ```bash
-# Test your post-commands
-pgbranch test-post-commands feature/test-branch
+# Start new feature
+git checkout -b feature/user-auth
 
-# Test switch functionality without database operations
-pgbranch test-switch feature/test-branch
+# Database automatically created and switched
+# Run your app - it's now using the feature database!
 
-# Check what template variables are available
-pgbranch templates feature/test-branch
+# Make schema changes, run migrations
+npm run migrate
 
-# Verify configuration is valid
-pgbranch check
+# Switch back to main
+git checkout main
+# Automatically switches to main database
 ```
 
-## How It Works
+### PR Review
 
-1. **Template-Based Copying**: Uses PostgreSQL's `CREATE DATABASE ... WITH TEMPLATE` feature for fast database duplication
-2. **Git Hook Integration**: Installs `post-checkout` and `post-merge` hooks to automatically create and switch database branches
-3. **Smart Filtering**: Uses regex patterns and exclude lists to control which Git branches trigger database creation/switching
-4. **Configuration Discovery**: Searches for `.pgbranch.yml` or `.pgbranch.yaml` files in current directory and parent directories
-5. **Branch State Management**: Tracks current database branch in configuration file for consistent state
-6. **Interactive Selection**: Provides arrow-key navigation with fuzzy filtering for easy branch switching
-7. **Post-Command Execution**: Runs on every branch switch to update application configuration
+```bash
+# Fetch and checkout PR branch
+git fetch origin
+git checkout feature/cool-feature
 
-## Use Cases
+# Database automatically created from main
+# Your local env now matches the PR's database state!
+```
 
-- **Migration Testing**: Test database migrations in isolation before merging
-- **Feature Development**: Each feature branch gets its own database state
-- **Preview Environments**: Automatically provision database branches for feature previews
-- **Parallel Development**: Multiple developers can work on different features without database conflicts
-- **PR Review**: Quickly switch to any branch and have the correct database state
-- **Manual Database Management**: Switch between database branches independently of Git branches
-- **Multi-Environment Testing**: Test the same code against different database states
+### Manual Database Management
 
-## Requirements
+```bash
+# Interactive branch selection
+pgbranch switch
 
-- PostgreSQL server with template database access
-- Git repository
-- Rust 1.70+ (for building from source)
+# Direct switch
+pgbranch switch feature-auth
 
-## License
+# Create without Git branch
+pgbranch create experiment-1
+```
+
+## 🏗️ Architecture
+
+pgbranch uses a flexible backend architecture:
+
+```
+┌─────────────┐     ┌──────────────┐
+│   CLI/Git   │────▶│ Backend Trait│
+└─────────────┘     └──────┬───────┘
+                           │
+        ┌──────────────────┼──────────────────┐
+        │                  │                  │
+   ┌────▼─────┐      ┌────▼────┐      ┌─────▼────┐
+   │PostgreSQL│      │  Neon   │      │   Xata   │
+   │  Local   │      │   API   │      │   API    │
+   └──────────┘      └─────────┘      └──────────┘
+```
+
+All backends implement the same interface, ensuring consistent behavior and allowing you to switch providers without changing your configuration structure or post-commands.
+
+## 📚 Advanced Usage
+
+### Environment Variables
+
+All configuration values can use environment variables:
+```yaml
+backend:
+  type: neon
+  neon:
+    api_key: ${NEON_API_KEY}
+    project_id: ${NEON_PROJECT_ID:-default-project}
+```
+
+### Conditional Execution
+
+Control when commands run:
+```yaml
+post_commands:
+  - name: "Django migrations"
+    command: "python manage.py migrate"
+    condition: "file_exists:manage.py"
+    
+  - name: "Node migrations"
+    command: "npm run migrate"
+    condition: "file_exists:package.json"
+```
+
+### Multiple Environments
+
+Use different backends for different environments:
+```bash
+# Development
+cp .pgbranch.local.yml .pgbranch.yml
+
+# Staging (using Neon)
+cp .pgbranch.neon.yml .pgbranch.yml
+
+# Production (using Database Lab)
+cp .pgbranch.dblab.yml .pgbranch.yml
+```
+
+## 🤝 Contributing
+
+Contributions are welcome! The backend system is extensible - new providers can be added by implementing the `DatabaseBranchingBackend` trait.
+
+## 📄 License
 
 MIT License
+
+## 🙏 Acknowledgments
+
+- PostgreSQL for the TEMPLATE feature
+- Neon, Database Lab Engine, and Xata teams for their excellent APIs
+- The Rust community for amazing libraries

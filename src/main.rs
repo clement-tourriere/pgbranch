@@ -8,6 +8,7 @@ mod cli;
 mod docker;
 mod post_commands;
 mod local_state;
+mod backends;
 
 use cli::Commands;
 

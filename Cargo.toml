@@ -1,0 +1,111 @@
+[package]
+name = "pgbranch"
+version = "0.2.0"
+edition = "2021"
+description = "A tool for creating PostgreSQL database branches that sync with Git branches"
+authors = ["Clément Tourrière <clement.tourriere@gmail.com>"]
+license = "MIT"
+repository = "https://github.com/clement-tourriere/pgbranch"
+
+[features]
+default = ["backend-local", "backend-postgres-template", "backend-neon", "backend-dblab", "backend-xata"]
+backend-local = ["dep:bollard", "dep:rusqlite", "dep:rust-s3", "dep:tar", "dep:bytes", "dep:futures-util", "dep:tempfile", "dep:uuid", "dep:url"]
+backend-postgres-template = ["dep:tokio-postgres"]
+backend-neon = ["dep:reqwest"]
+backend-dblab = ["dep:reqwest"]
+backend-xata = ["dep:reqwest"]
+
+[dependencies]
+# CLI and argument parsing
+clap = { version = "4.5", default-features = false, features = ["derive", "std", "help", "usage", "error-context"] }
+
+# Serialization
+serde = { version = "1.0", default-features = false, features = ["derive", "std"] }
+serde_yaml_ng = { version = "0.10", default-features = false }
+serde_json = "1.0"
+
+# Async runtime
+tokio = { version = "1.46", default-features = false, features = ["rt", "rt-multi-thread", "net", "time", "macros", "process", "fs"] }
+
+# Database (for postgres_template backend)
+tokio-postgres = { version = "0.7", default-features = false, features = ["runtime"], optional = true }
+
+# Error handling
+anyhow = "1.0"
+
+# Async trait support
+async-trait = "0.1"
+
+# Git operations
+git2 = { version = "0.20", default-features = false }
+
+# Text matching
+regex = { version = "1.11", default-features = false, features = ["std", "perf-cache"] }
+
+# File system
+dirs = { version = "6.0", default-features = false }
+
+# Logging
+log = { version = "0.4", default-features = false, features = ["release_max_level_off"] }
+env_logger = { version = "0.11", default-features = false, features = ["humantime"] }
+
+# Password input
+rpassword = { version = "7.4", default-features = false }
+
+# Terminal UI for interactive selection
+inquire = { version = "0.9", default-features = false, features = ["crossterm"] }
+
+# Date/time handling
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+
+# SQLite for local backend state
+rusqlite = { version = "0.38", default-features = false, features = ["bundled"], optional = true }
+
+# UUID generation
+uuid = { version = "1.15", features = ["v4", "serde"], optional = true }
+
+# HTTP client for cloud backends
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"], optional = true }
+
+# URL parsing
+url = { version = "2.5", optional = true }
+
+# S3 support for data seeding
+rust-s3 = { version = "0.37", default-features = false, features = ["tokio-rustls-tls"], optional = true }
+
+# Temp files
+tempfile = { version = "3.20", optional = true }
+
+# Docker Engine API client
+bollard = { version = "0.20", default-features = false, features = ["ssl", "pipe"], optional = true }
+bytes = { version = "1", optional = true }
+futures-util = { version = "0.3", default-features = false, features = ["std"], optional = true }
+
+# Tar archive creation (for bollard upload_to_container)
+tar = { version = "0.4", default-features = false, optional = true }
+
+[profile.release]
+# Aggressive size optimization
+opt-level = "s"        # Optimize for size with better runtime performance than "z"
+lto = "fat"            # Fat Link Time Optimization for maximum size reduction
+codegen-units = 1      # Reduce parallel code generation units
+panic = "abort"        # Abort on panic instead of unwinding
+strip = true           # Strip symbols and debug info
+overflow-checks = false # Disable overflow checks for smaller binary
+debug-assertions = false # Disable debug assertions
+incremental = false    # Disable incremental compilation
+
+[profile.dev]
+# Keep development builds fast
+opt-level = 0
+debug = true
+split-debuginfo = "unpacked"  # Skip dsymutil on macOS, saves 1-5s per incremental build
+
+# Optimize heavy C/crypto deps in dev — these run slowly at opt-level 0
+# and never need debugging. No impact on incremental build times.
+[profile.dev.package.libsqlite3-sys]
+opt-level = 1
+[profile.dev.package.ring]
+opt-level = 2
+[profile.dev.package.aws-lc-sys]
+opt-level = 2

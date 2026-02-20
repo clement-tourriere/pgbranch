@@ -1,0 +1,26 @@
+{
+  "database": {
+    "host": "localhost",
+    "port": 5432,
+    "user": "postgres",
+    "password": null,
+    "template_database": "template0",
+    "database_prefix": "pgbranch"
+  },
+  "git": {
+    "auto_create_on_branch": true,
+    "branch_filter_regex": "^(feature|bugfix|hotfix)/.*",
+    "exclude_branches": [
+      "main",
+      "master",
+      "develop",
+      "staging",
+      "production"
+    ]
+  },
+  "behavior": {
+    "auto_cleanup": false,
+    "max_branches": 10,
+    "naming_strategy": "prefix"
+  }
+}

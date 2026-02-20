@@ -1,0 +1,391 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-and-test:
+    name: Build & Test
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: -C link-arg=-fuse-ld=mold
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install mold linker
+        run: sudo apt-get install -y mold
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy -- -D warnings
+
+      - name: Build
+        run: cargo build
+
+      - name: Test
+        run: cargo test
+
+  integration-macos:
+    name: Integration (macOS / APFS)
+    needs: build-and-test
+    if: ${{ false }}
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build
+
+      - name: Set up Docker
+        run: |
+          brew install docker colima
+          colima start
+          # Wait for Docker to be ready
+          for i in $(seq 1 30); do
+            if docker info &>/dev/null 2>&1; then
+              echo "Docker is ready"
+              break
+            fi
+            sleep 2
+          done
+          docker version
+
+      - name: Pull postgres image
+        run: docker pull postgres:17
+
+      - name: Run integration tests
+        env:
+          EXPECTED_STORAGE: apfs_clone
+        run: |
+          set -euo pipefail
+          PGBRANCH=$GITHUB_WORKSPACE/target/debug/pgbranch
+
+          # Set up test git repo
+          mkdir -p /tmp/pgbranch-test && cd /tmp/pgbranch-test
+          git init
+          git config user.email "ci@test.com"
+          git config user.name "CI"
+          git commit --allow-empty -m "init"
+
+          # Doctor + Init
+          $PGBRANCH doctor
+          $PGBRANCH --non-interactive init ci-test
+
+          # Verify storage backend
+          STORAGE=$($PGBRANCH --json status | jq -r '.storage')
+          echo "Detected storage: $STORAGE"
+          if [ "$STORAGE" != "$EXPECTED_STORAGE" ]; then
+            echo "ERROR: Expected storage '$EXPECTED_STORAGE' but got '$STORAGE'"
+            exit 1
+          fi
+
+          # Branch lifecycle
+          $PGBRANCH --non-interactive create test-feature
+          $PGBRANCH --json list
+          $PGBRANCH --json connection test-feature
+          $PGBRANCH stop test-feature
+          $PGBRANCH start test-feature
+          $PGBRANCH delete test-feature
+          $PGBRANCH --json list
+
+          # Cleanup
+          $PGBRANCH --non-interactive destroy --force
+
+  integration-linux-zfs:
+    name: Integration (Linux / ZFS)
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: -C link-arg=-fuse-ld=mold
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install mold linker
+        run: sudo apt-get install -y mold
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build
+
+      - name: Install ZFS
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zfsutils-linux
+          sudo modprobe zfs
+
+      - name: Set up ZFS pool
+        run: $GITHUB_WORKSPACE/target/debug/pgbranch setup-zfs --pool-name pgbranch --size 2G
+
+      - name: Redirect pgbranch data to ZFS
+        run: |
+          mkdir -p ~/.local/share
+          rm -rf ~/.local/share/pgbranch
+          ln -s /var/lib/pgbranch/data ~/.local/share/pgbranch
+
+      - name: Pull postgres image
+        run: docker pull postgres:17
+
+      - name: Run integration tests
+        env:
+          EXPECTED_STORAGE: zfs
+          PGBRANCH_ZFS_DATASET: pgbranch
+        run: |
+          set -euo pipefail
+          RUNNER_HOME="$HOME"
+          PGBRANCH="$GITHUB_WORKSPACE/target/debug/pgbranch"
+
+          sudo \
+            HOME="$RUNNER_HOME" \
+            XDG_DATA_HOME="$RUNNER_HOME/.local/share" \
+            EXPECTED_STORAGE="$EXPECTED_STORAGE" \
+            PGBRANCH_ZFS_DATASET="$PGBRANCH_ZFS_DATASET" \
+            PGBRANCH="$PGBRANCH" \
+            bash <<'EOF'
+          set -euo pipefail
+
+          # Set up test git repo
+          mkdir -p /tmp/pgbranch-test && cd /tmp/pgbranch-test
+          git init
+          git config user.email "ci@test.com"
+          git config user.name "CI"
+          git commit --allow-empty -m "init"
+
+          # Doctor + Init
+          $PGBRANCH doctor
+          $PGBRANCH --non-interactive init ci-test
+
+          # Verify storage backend
+          STORAGE=$($PGBRANCH --json status | jq -r '.storage')
+          echo "Detected storage: $STORAGE"
+          if [ "$STORAGE" != "$EXPECTED_STORAGE" ]; then
+            echo "ERROR: Expected storage '$EXPECTED_STORAGE' but got '$STORAGE'"
+            exit 1
+          fi
+
+          # Branch lifecycle
+          $PGBRANCH --non-interactive create test-feature
+          $PGBRANCH --json list
+          $PGBRANCH --json connection test-feature
+          $PGBRANCH stop test-feature
+          $PGBRANCH start test-feature
+          $PGBRANCH delete test-feature
+          $PGBRANCH --json list
+
+          # Cleanup
+          $PGBRANCH --non-interactive destroy --force
+          EOF
+
+  integration-linux-xfs:
+    name: Integration (Linux / XFS reflink)
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: -C link-arg=-fuse-ld=mold
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install mold linker
+        run: sudo apt-get install -y mold
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build
+
+      - name: Set up XFS with reflink
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xfsprogs
+          sudo truncate -s 2G /tmp/xfs.img
+          sudo mkfs.xfs -m reflink=1 /tmp/xfs.img
+          sudo mkdir -p /mnt/pgbranch-xfs
+          sudo mount -o loop /tmp/xfs.img /mnt/pgbranch-xfs
+          sudo chown -R $(whoami):$(whoami) /mnt/pgbranch-xfs
+
+      - name: Redirect pgbranch data to XFS
+        run: |
+          mkdir -p ~/.local/share
+          ln -sf /mnt/pgbranch-xfs ~/.local/share/pgbranch
+
+      - name: Pull postgres image
+        run: docker pull postgres:17
+
+      - name: Run integration tests
+        env:
+          EXPECTED_STORAGE: reflink
+        run: |
+          set -euo pipefail
+          PGBRANCH=$GITHUB_WORKSPACE/target/debug/pgbranch
+
+          # Set up test git repo
+          mkdir -p /tmp/pgbranch-test && cd /tmp/pgbranch-test
+          git init
+          git config user.email "ci@test.com"
+          git config user.name "CI"
+          git commit --allow-empty -m "init"
+
+          # Doctor + Init
+          $PGBRANCH doctor
+          $PGBRANCH --non-interactive init ci-test
+
+          # Verify storage backend
+          STORAGE=$($PGBRANCH --json status | jq -r '.storage')
+          echo "Detected storage: $STORAGE"
+          if [ "$STORAGE" != "$EXPECTED_STORAGE" ]; then
+            echo "ERROR: Expected storage '$EXPECTED_STORAGE' but got '$STORAGE'"
+            exit 1
+          fi
+
+          # Branch lifecycle
+          $PGBRANCH --non-interactive create test-feature
+          $PGBRANCH --json list
+          $PGBRANCH --json connection test-feature
+          $PGBRANCH stop test-feature
+          $PGBRANCH start test-feature
+          $PGBRANCH delete test-feature
+          $PGBRANCH --json list
+
+          # Cleanup
+          $PGBRANCH --non-interactive destroy --force
+
+  integration-linux-btrfs:
+    name: Integration (Linux / Btrfs reflink)
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: -C link-arg=-fuse-ld=mold
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install mold linker
+        run: sudo apt-get install -y mold
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build
+
+      - name: Set up Btrfs
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y btrfs-progs
+          sudo truncate -s 2G /tmp/btrfs.img
+          sudo mkfs.btrfs /tmp/btrfs.img
+          sudo mkdir -p /mnt/pgbranch-btrfs
+          sudo mount -o loop /tmp/btrfs.img /mnt/pgbranch-btrfs
+          sudo chown -R $(whoami):$(whoami) /mnt/pgbranch-btrfs
+
+      - name: Redirect pgbranch data to Btrfs
+        run: |
+          mkdir -p ~/.local/share
+          ln -sf /mnt/pgbranch-btrfs ~/.local/share/pgbranch
+
+      - name: Pull postgres image
+        run: docker pull postgres:17
+
+      - name: Run integration tests
+        env:
+          EXPECTED_STORAGE: reflink
+        run: |
+          set -euo pipefail
+          PGBRANCH=$GITHUB_WORKSPACE/target/debug/pgbranch
+
+          # Set up test git repo
+          mkdir -p /tmp/pgbranch-test && cd /tmp/pgbranch-test
+          git init
+          git config user.email "ci@test.com"
+          git config user.name "CI"
+          git commit --allow-empty -m "init"
+
+          # Doctor + Init
+          $PGBRANCH doctor
+          $PGBRANCH --non-interactive init ci-test
+
+          # Verify storage backend
+          STORAGE=$($PGBRANCH --json status | jq -r '.storage')
+          echo "Detected storage: $STORAGE"
+          if [ "$STORAGE" != "$EXPECTED_STORAGE" ]; then
+            echo "ERROR: Expected storage '$EXPECTED_STORAGE' but got '$STORAGE'"
+            exit 1
+          fi
+
+          # Branch lifecycle
+          $PGBRANCH --non-interactive create test-feature
+          $PGBRANCH --json list
+          $PGBRANCH --json connection test-feature
+          $PGBRANCH stop test-feature
+          $PGBRANCH start test-feature
+          $PGBRANCH delete test-feature
+          $PGBRANCH --json list
+
+          # Cleanup
+          $PGBRANCH --non-interactive destroy --force
+
+  release:
+    name: Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs:
+      - integration-linux-zfs
+      - integration-linux-xfs
+      - integration-linux-btrfs
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact_name: pgbranch-linux-amd64
+          - os: macos-latest
+            artifact_name: pgbranch-macos-arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install mold linker (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get install -y mold
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        run: cargo build --release
+        env:
+          RUSTFLAGS: ${{ runner.os == 'Linux' && '-C link-arg=-fuse-ld=mold' || '' }}
+
+      - name: Package binary
+        run: |
+          mkdir -p dist
+          cp target/release/pgbranch dist/${{ matrix.artifact_name }}
+          chmod +x dist/${{ matrix.artifact_name }}
+
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/${{ matrix.artifact_name }}
+          generate_release_notes: true

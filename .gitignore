@@ -1,0 +1,36 @@
+# Rust
+/target/
+**/*.rs.bk
+*.pdb
+Cargo.lock
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Claude
+.claude/
+
+# pgbranch
+.pgbranch.yml
+.pgbranch.local.yml
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
